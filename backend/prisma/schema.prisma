@@ -1,0 +1,210 @@
+// Data model v4 — xem docs/plan-v4.md (ground truth cho tên bảng/cột và
+// Domain Rules v2.2). Step 2 / Day 2: chỉ định nghĩa schema, KHÔNG chạy
+// migration ở đây (máy này không có Docker/Postgres sống — xem README).
+//
+// Quy ước: PK là uuid (@default(uuid())), tên bảng/cột map snake_case bằng
+// @@map/@map để khớp đúng plan-v4.md dù Prisma model/field dùng PascalCase/
+// camelCase theo convention chuẩn của Prisma.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum SourceType {
+  API
+  DATABASE
+  CRAWLER
+  MQTT
+
+  @@map("source_type")
+}
+
+enum CollectionRunStatus {
+  RUNNING
+  SUCCESS
+  FAILED
+
+  @@map("collection_run_status")
+}
+
+enum Station {
+  RECEIVING
+  SORTING
+  WASHING
+  DRYING
+  FOLDING
+  DISPATCH
+
+  @@map("station")
+}
+
+enum CanonicalEventStatus {
+  ACCEPTED
+  CONFLICT
+
+  @@map("canonical_event_status")
+}
+
+enum SourceRelationship {
+  PRIMARY
+  DUPLICATE
+  SUPERSEDED
+  CONFLICT
+
+  @@map("source_relationship")
+}
+
+enum ManagementAction {
+  BLOCK
+  RESUME
+  ACK_EXCEPTION
+  ADD_NOTE
+
+  @@map("management_action")
+}
+
+model Source {
+  id        String     @id @default(uuid()) @db.Uuid
+  name      String
+  // jsonb — connection metadata only. TUYỆT ĐỐI không lưu secret plaintext ở
+  // đây (API key/password thật phải đi qua secret manager riêng, ngoài phạm
+  // vi bảng này); xem test "secret regression" trong plan-v4.md.
+  type      SourceType
+  config    Json
+  createdAt DateTime   @default(now()) @map("created_at")
+  updatedAt DateTime   @updatedAt @map("updated_at")
+
+  collectionRuns CollectionRun[]
+  sourceRecords  SourceRecord[]
+
+  @@map("sources")
+}
+
+model CollectionRun {
+  id          String              @id @default(uuid()) @db.Uuid
+  sourceId    String              @map("source_id") @db.Uuid
+  source      Source              @relation(fields: [sourceId], references: [id])
+  startedAt   DateTime            @map("started_at")
+  finishedAt  DateTime?           @map("finished_at")
+  status      CollectionRunStatus
+  recordsRead Int                 @default(0) @map("records_read")
+  errorCount  Int                 @default(0) @map("error_count")
+  createdAt   DateTime            @default(now()) @map("created_at")
+
+  sourceRecords SourceRecord[]
+
+  @@index([sourceId])
+  @@map("collection_runs")
+}
+
+// APPEND-ONLY tuyệt đối (Rule 1, Rule 5.6): mỗi lần đọc từ nguồn ngoài tạo 1
+// row mới, kể cả khi sourceId+sourceRecordId trùng với row đã có — KHÔNG có
+// unique constraint trên (source_id, source_record_id), chỉ index để tra
+// cứu/audit. Không expose UPDATE/DELETE cho entity này ở tầng
+// repository/service (áp dụng ở Step 3, ghi chú lại đây để không quên).
+model SourceRecord {
+  id              String        @id @default(uuid()) @db.Uuid
+  sourceId        String        @map("source_id") @db.Uuid
+  source          Source        @relation(fields: [sourceId], references: [id])
+  // Business identifier từ nguồn ngoài (Rule 1) — KHÔNG unique, không dùng để
+  // chặn insert.
+  sourceRecordId  String        @map("source_record_id")
+  collectionRunId String        @map("collection_run_id") @db.Uuid
+  collectionRun   CollectionRun @relation(fields: [collectionRunId], references: [id])
+  // Không FK tới batches — batch có thể được nhắc tới trước khi tồn tại
+  // trong hệ thống nghiệp vụ (raw layer không phụ thuộc canonical layer).
+  batchId         String        @map("batch_id")
+  station         Station
+  payload         Json
+  eventTime       DateTime      @map("event_time")
+  receivedAt      DateTime      @default(now()) @map("received_at")
+
+  canonicalEventSources CanonicalEventSource[]
+
+  @@index([sourceId, sourceRecordId])
+  @@index([batchId, station])
+  @@map("source_records")
+}
+
+// canonicalKey = `${batchId}:${station}` (Rule 2) — UNIQUE bắt buộc, đây là
+// bất biến trung tâm của canonicalization: tối đa 1 canonical_event cho mỗi
+// batch+station tại một thời điểm.
+model CanonicalEvent {
+  id           String               @id @default(uuid()) @db.Uuid
+  // Không FK tới batches — xem ghi chú ở SourceRecord.batchId.
+  batchId      String               @map("batch_id")
+  station      Station
+  quantity     Decimal              @db.Decimal
+  eventTime    DateTime             @map("event_time")
+  status       CanonicalEventStatus
+  canonicalKey String               @unique @map("canonical_key")
+  updatedAt    DateTime             @updatedAt @map("updated_at")
+
+  sources CanonicalEventSource[]
+
+  @@index([batchId])
+  @@map("canonical_events")
+}
+
+// Join table canonical_event <-> source_record. sourceRecordPk trỏ tới
+// source_records.id (internal PK) — KHÔNG phải source_records.source_record_id
+// (business identifier). Xem schema fix #2 trong plan-v4.md.
+model CanonicalEventSource {
+  canonicalEventId String             @map("canonical_event_id") @db.Uuid
+  canonicalEvent   CanonicalEvent     @relation(fields: [canonicalEventId], references: [id])
+  sourceRecordPk   String             @map("source_record_pk") @db.Uuid
+  sourceRecord     SourceRecord       @relation(fields: [sourceRecordPk], references: [id])
+  relationship     SourceRelationship
+
+  // Composite PK đóng luôn vai trò unique constraint (canonical_event_id,
+  // source_record_pk) theo yêu cầu — không cần cột id riêng.
+  @@id([canonicalEventId, sourceRecordPk])
+  @@map("canonical_event_sources")
+}
+
+model WorkOrder {
+  id          String @id @default(uuid()) @db.Uuid
+  workOrderId String @unique @map("work_order_id")
+  lineId      String @map("line_id")
+
+  batches Batch[]
+
+  @@map("work_orders")
+}
+
+model Batch {
+  id          String    @id @default(uuid()) @db.Uuid
+  batchId     String    @unique @map("batch_id")
+  // NOT NULL theo Rule 7 — batch luôn thuộc về 1 work order.
+  workOrderId String    @map("work_order_id") @db.Uuid
+  workOrder   WorkOrder @relation(fields: [workOrderId], references: [id])
+
+  @@map("batches")
+}
+
+model ManagementEvent {
+  id             String           @id @default(uuid()) @db.Uuid
+  organizationId String           @map("organization_id")
+  // Không FK tới batches — xem ghi chú ở SourceRecord.batchId.
+  batchId        String           @map("batch_id")
+  actor          String
+  action         ManagementAction
+  timestamp      DateTime
+  note           String?          @db.Text
+
+  @@index([batchId])
+  @@map("management_events")
+}
+
+model Line {
+  id     String  @id @default(uuid()) @db.Uuid
+  lineId String  @unique @map("line_id")
+  name   String?
+
+  @@map("lines")
+}

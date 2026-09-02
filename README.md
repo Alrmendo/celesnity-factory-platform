@@ -35,9 +35,14 @@ lập bằng `docker compose up` như trên máy local bình thường.
 
 ## Trạng thái hiện tại
 
-Đang là **skeleton** (Day 1 / 4). Kiến trúc đầy đủ, data model, và Domain
-Rules v2.2 được ghi chi tiết trong [`docs/plan-v4.md`](docs/plan-v4.md) — đó
-là tài liệu tham chiếu chính, không lặp lại ở đây.
+Đang ở **Day 2 / 4**. Kiến trúc đầy đủ, data model, và Domain Rules v2.2 được
+ghi chi tiết trong [`docs/plan-v4.md`](docs/plan-v4.md) — đó là tài liệu tham
+chiếu chính, không lặp lại ở đây.
+
+Schema Postgres (9 bảng, Prisma) đã viết xong ở `backend/prisma/schema.prisma`
+nhưng **chưa chạy migration thật** — máy code hôm nay không có Docker sống.
+Xem mục [Việc cần làm ở máy có Docker](#việc-cần-làm-ở-máy-có-docker) bên
+dưới.
 
 Backend là modular monolith NestJS, hiện có 5 module nghiệp vụ (đang rỗng,
 chưa có entity/logic thật):
@@ -94,3 +99,71 @@ chưa có entity/logic thật):
   hôm nay — đúng phạm vi Step 1.
 - Backend chạy ở port 3001 (không phải 3000 mặc định của Nest) để tránh đụng
   port 3000 của frontend khi chạy cả hai cùng lúc trên host.
+
+### Day 2 — 2026-09-02
+
+**Đã làm:**
+- Viết `backend/prisma/schema.prisma` — đủ 9 bảng theo data model v4
+  (`docs/plan-v4.md`): `sources`, `collection_runs`, `source_records`,
+  `canonical_events`, `canonical_event_sources`, `work_orders`, `batches`,
+  `management_events`, `lines`. Tên bảng/cột map snake_case đúng plan bằng
+  `@@map`/`@map`; model/field Prisma dùng PascalCase/camelCase chuẩn.
+- Cài `prisma` + `@prisma/client` vào `backend/` làm devDependency/dependency.
+- Verify OFFLINE (không cần kết nối DB): `npx prisma format` và
+  `npx prisma validate` — cả hai chạy sạch, không lỗi cú pháp/cấu trúc.
+- Thêm `DATABASE_URL` vào `backend/.env.example` (Prisma CLI cần 1 connection
+  string duy nhất, khác với các biến `DB_*` rời rạc mà `pg.Pool` ở
+  `DatabaseModule` đang dùng).
+
+**Vấn đề gặp phải:**
+- Phát hiện `backend/.env.example` (viết từ Day 1) ghi `DB_PORT=5432` cho
+  trường hợp chạy backend trực tiếp trên host — sai, vì `docker-compose.yml`
+  publish Postgres ra host ở port **5433** (`5433:5432`), không phải 5432.
+  Đã sửa `DB_PORT=5432 → 5433` trong lúc thêm `DATABASE_URL` để 2 giá trị
+  không lệch nhau; chưa ảnh hưởng runtime nào trước đó vì chưa ai chạy
+  backend trực tiếp trên host để nối `DB_PORT` này.
+- `npm install --save-dev prisma@latest` cài về **Prisma 8.0.0-rc.12** — bản
+  này đổi hẳn sang CLI "Prisma Developer Platform" mới (`prisma project`,
+  `prisma orm`, `prisma deploy`...), không còn `prisma format` / `validate` /
+  `migrate dev` theo nghĩa cổ điển nữa. Đã pin lại về **Prisma 6.19.3** (bản
+  ổn định mới nhất trước v8) để có đúng các lệnh cần dùng — xem "Quyết định
+  phát sinh" bên dưới.
+
+**Quyết định phát sinh:**
+- Chọn Prisma làm ORM/migration tool (theo yêu cầu), đặt ở `backend/prisma/`.
+  Lý do: migration file tự sinh từ schema, type-safe client cho Step 3, và
+  `prisma validate`/`format` cho phép kiểm tra cấu trúc schema hoàn toàn
+  offline — đúng nhu cầu hôm nay (code trên máy không có Docker/Postgres
+  sống, không kết nối DB được).
+- **Pin `prisma`/`@prisma/client` ở `6.19.3`**, không dùng `latest` (hiện là
+  `8.0.0-rc.12`, release candidate của CLI thế hệ mới, khác API/command hoàn
+  toàn với ORM CLI cổ điển mà `npx prisma migrate dev --name init_schema`
+  trong checklist bên dưới cần dùng). Khi máy có Docker nâng cấp lên Prisma
+  v8 stable, cần review lại toàn bộ command trong checklist trước.
+- Tất cả PK của 9 bảng dùng `String @id @default(uuid())` — plan-v4.md chỉ
+  ghi "id (PK)", không chỉ định kiểu; chọn UUID (thay vì serial/int) để
+  tránh lộ số thứ tự record qua ID và khớp thói quen chuẩn của Prisma.
+- `canonical_event_sources` dùng composite PK
+  `@@id([canonicalEventId, sourceRecordPk])` thay vì thêm cột `id` riêng —
+  composite PK tự động đóng vai trò unique constraint mà đề bài yêu cầu, nên
+  không cần cột thừa.
+- `source_records.batch_id`, `canonical_events.batch_id`,
+  `management_events.batch_id` cố tình **không** phải FK tới `batches` — ghi
+  rõ bằng comment ngay trong schema (không chỉ trong README) để không ai vô
+  tình "sửa cho đúng" thành FK sau này.
+
+## Việc cần làm ở máy có Docker
+
+Checklist thủ công — làm ở máy laptop có Docker chạy được, sau khi pull code
+mới nhất:
+
+- [ ] Pull code mới nhất
+- [ ] `docker compose up --build` (nhớ postgres đã remap host port 5433)
+- [ ] `cd backend && npx prisma migrate dev --name init_schema`
+- [ ] Verify unique constraint trên `canonical_events.canonical_key` (thử
+      insert trùng key, phải bị Postgres từ chối)
+- [ ] Verify FK đúng hướng (sources <- collection_runs <- source_records;
+      batches <- canonical_event_sources qua canonical_events; work_orders
+      <- batches)
+- [ ] Verify source_records/canonical_events/management_events.batch_id
+      KHÔNG có FK constraint tới batches (đúng chủ đích thiết kế)
