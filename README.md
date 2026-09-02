@@ -35,7 +35,7 @@ lập bằng `docker compose up` như trên máy local bình thường.
 
 ## Trạng thái hiện tại
 
-Đang ở **Day 2 / 4**. Kiến trúc đầy đủ, data model, và Domain Rules v2.2 được
+Đang ở **Day 3 / 4**. Kiến trúc đầy đủ, data model, và Domain Rules v2.2 được
 ghi chi tiết trong [`docs/plan-v4.md`](docs/plan-v4.md) — đó là tài liệu tham
 chiếu chính, không lặp lại ở đây.
 
@@ -43,6 +43,12 @@ Schema Postgres (9 bảng, Prisma) đã viết xong ở `backend/prisma/schema.p
 nhưng **chưa chạy migration thật** — máy code hôm nay không có Docker sống.
 Xem mục [Việc cần làm ở máy có Docker](#việc-cần-làm-ở-máy-có-docker) bên
 dưới.
+
+Canonicalization pipeline (Rule 1–5b) đã viết xong ở
+`backend/src/modules/canonicalization/` dưới dạng pure function, test bằng
+Jest trên mock data trong bộ nhớ — **chưa wire Prisma Client thật** vào
+service (chưa query DB thật); việc đó cùng `ProductionDomainModule` (Rule
+6–7) để dành Step 4 trên máy có Docker.
 
 Backend là modular monolith NestJS, hiện có 5 module nghiệp vụ (đang rỗng,
 chưa có entity/logic thật):
@@ -151,6 +157,74 @@ chưa có entity/logic thật):
   `management_events.batch_id` cố tình **không** phải FK tới `batches` — ghi
   rõ bằng comment ngay trong schema (không chỉ trong README) để không ai vô
   tình "sửa cho đúng" thành FK sau này.
+
+### Day 3 — 2026-09-02
+
+**Đã làm:**
+- Viết canonicalization pipeline thuần TypeScript trong
+  `backend/src/modules/canonicalization/`, cover Rule 1–5b
+  (`docs/plan-v4.md`, Domain Rules v2.2):
+  - `types.ts` — type độc lập với Prisma Client (`SourceRecordInput`,
+    `CanonicalEventResult`, `SourceLinkResult`, `CanonicalizationResult`).
+  - `source-priority.ts` — bảng tier theo Rule 4 (DATABASE/API = tier 1,
+    CRAWLER/MQTT = tier 2).
+  - `canonicalization.pipeline.ts` — pure function, không side-effect, không
+    gọi DB: `groupByOperationalIdentity` (Rule 2), `resolveGroup` (Rule 5 đầy
+    đủ: 5.2 same-source last-observed-wins, 5.3 cross-tier, 5.4 same-tier
+    CONFLICT, 5.5 same-tier corroboration), `resolveAll`.
+  - `quality-indicators.ts` — `deriveQualityIndicators` (Rule 5b, chỉ phần
+    sinh dữ liệu, `acknowledged` luôn khởi tạo `false`).
+  - `canonicalization.service.ts` — service mỏng gọi
+    `resolveAll` + `deriveQualityIndicators`, nhận `SourceRecordInput[]` trực
+    tiếp qua tham số, không query Prisma.
+- `canonicalization.pipeline.spec.ts` — 9 test case (7 case bắt buộc theo
+  spec + 2 case bổ sung: grouping độc lập với `sourceRecordId`, và "không
+  sinh indicator khi ACCEPTED"), tất cả pass qua `npm run test`.
+- `npx tsc --noEmit` và `npx eslint` trên toàn bộ thư mục
+  `canonicalization/` chạy sạch, không lỗi.
+
+**Vấn đề gặp phải:**
+- `eslint --fix` (rule `no-unnecessary-type-assertion`) tự xoá một `as
+  SourceRelationship` mà TypeScript compiler (`tsc --noEmit`) sau đó báo là
+  **cần thiết** (`intraSourceLinks.get(...)` trả về `SourceRelationship |
+  undefined`, không gán thẳng được vào field kiểu `SourceRelationship`) —
+  eslint và tsc không đồng nhất ở đây. Sửa bằng cách thêm annotation kiểu
+  tường minh cho biến trung gian (`const relationship: SourceRelationship =
+  ...`) rồi giữ lại `as` — chạy lại cả `tsc --noEmit` lẫn `eslint` đều sạch
+  sau đó. Bài học: sau `--fix`, luôn chạy lại `tsc --noEmit`, không chỉ tin
+  eslint report "0 problems".
+
+**Quyết định phát sinh:**
+- Pipeline hôm nay hoàn toàn là pure function nhận `SourceRecordInput[]` qua
+  tham số — **chưa wire Prisma Client thật** vào service (không query DB,
+  không transaction insert→recompute→update). Việc đó để Step 4, làm trên
+  máy có Docker/Postgres sống.
+- Rule 2 nói "same source, same key → last-observed-wins", nhưng không nói
+  rõ phải xử lý sao khi 1 group vừa có nhiều lần đọc từ CÙNG 1 nguồn vừa có
+  nhiều nguồn khác nhau cùng lúc. Chọn thiết kế 2 pha: (1) gộp theo `sourceId`
+  trong group, chọn "representative" mỗi nguồn bằng last-observed-wins (Rule
+  5.2) trước; (2) so sánh tier CHỈ giữa các representative (Rule 5.3/5.4/5.5).
+  Lý do: nếu không tách pha, 2 lần đọc lại (re-read) từ cùng 1 nguồn với
+  quantity khác nhau sẽ bị hiểu lầm thành "cùng tier, 2 giá trị khác nhau" →
+  sai thành CONFLICT trong khi đó chỉ là 1 nguồn tự cập nhật giá trị của nó.
+  Không có test case bắt buộc nào phủ đúng kịch bản kết hợp này (7 case yêu
+  cầu chỉ test từng nhánh riêng lẻ), nhưng thiết kế 2 pha đảm bảo đúng theo
+  đúng tinh thần Rule 2 khi mở rộng sau này.
+- `SourceLinkResult.sourceRecordId` (tên field cố định theo yêu cầu) được
+  gán bằng `SourceRecordInput.id` (identifier nội bộ của raw record), **không
+  phải** `SourceRecordInput.sourceRecordId` (business identifier từ nguồn
+  ngoài). Lý do: business `sourceRecordId` không đảm bảo unique trong 1 group
+  (xem case B005B — 2 record khác `sourceRecordId` nhưng cùng
+  `batchId+station`), nên không thể dùng để xác định chính xác record vật lý
+  nào nhận relationship nào. Cách map này khớp với schema fix #2 trong
+  plan-v4.md (`canonical_event_sources.source_record_pk → source_records.id`,
+  không phải business id) — ghi rõ trong comment tại `types.ts`.
+- Khi CONFLICT (Rule 5.4), `quantity`/`eventTime` đại diện của canonical
+  event chọn theo record có `receivedAt` mới nhất trong nhóm tranh chấp (tie-
+  break `id` tăng dần, đồng nhất với tie-break dùng cho Rule 5.2) — plan-v4.md
+  không chỉ định cách chọn, chỉ yêu cầu `status` phải là `CONFLICT`; chọn
+  cách này để nhất quán 1 quy tắc tie-break duy nhất xuyên suốt pipeline thay
+  vì có 2 quy tắc khác nhau cho 2 tình huống.
 
 ## Việc cần làm ở máy có Docker
 
