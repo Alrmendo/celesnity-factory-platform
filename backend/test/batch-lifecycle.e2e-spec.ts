@@ -89,105 +89,115 @@ describe('Batch lifecycle (Step 5, real Postgres)', () => {
     await truncateAll(prisma);
   });
 
-  it('resolves all 10 fixture scenarios (B001-B008, B005A, B005B, B006) to the expected batch status', async () => {
-    const scenarios = await buildBatchScenarios(prisma);
+  // One independent Jest test per scenario (test.each) rather than a single
+  // test looping over all 10 — each scenario gets its own pass/fail line in
+  // the output, and one scenario failing its assertions doesn't stop the
+  // others from running. Ingest/assert logic per scenario is unchanged from
+  // the single-test version; each case just rebuilds+ingests the full
+  // 10-scenario fixture set on its own (buildBatchScenarios always returns
+  // all 10 together, sharing sources/collection_runs) and asserts only its
+  // own batchId — safe because the top-level beforeEach truncates before
+  // every generated test.
+  const scenarioExpectations = {
+    B001: {
+      state: 'PLANNED',
+      currentStation: null,
+      completedQuantity: null,
+      missingStations: [],
+      freshnessStatus: 'NO_DATA',
+      qualityIndicatorCount: 0,
+    },
+    B002: {
+      state: 'IN_PROGRESS',
+      currentStation: 'RECEIVING',
+      completedQuantity: 100,
+      missingStations: [],
+      freshnessStatus: 'OK',
+      qualityIndicatorCount: 0,
+    },
+    B003: {
+      state: 'IN_PROGRESS',
+      currentStation: 'WASHING',
+      completedQuantity: 95,
+      missingStations: ['SORTING'],
+      freshnessStatus: 'OK',
+      qualityIndicatorCount: 0,
+    },
+    B004: {
+      state: 'IN_PROGRESS',
+      currentStation: 'WASHING',
+      completedQuantity: 95,
+      missingStations: ['SORTING'],
+      freshnessStatus: 'OK',
+      qualityIndicatorCount: 0,
+    },
+    B005A: {
+      state: 'IN_PROGRESS',
+      currentStation: 'WASHING',
+      completedQuantity: 50,
+      missingStations: ['RECEIVING', 'SORTING'],
+      freshnessStatus: 'OK',
+      qualityIndicatorCount: 0,
+    },
+    B005B: {
+      state: 'IN_PROGRESS',
+      currentStation: 'SORTING',
+      completedQuantity: 30,
+      missingStations: ['RECEIVING'],
+      freshnessStatus: 'OK',
+      qualityIndicatorCount: 0,
+    },
+    B006: {
+      state: 'IN_PROGRESS',
+      currentStation: 'DISPATCH',
+      completedQuantity: null,
+      missingStations: [],
+      freshnessStatus: 'OK',
+      qualityIndicatorCount: 1,
+    },
+    B007: {
+      state: 'BLOCKED',
+      currentStation: 'SORTING',
+      completedQuantity: 100,
+      missingStations: [],
+      freshnessStatus: 'OK',
+      qualityIndicatorCount: 0,
+    },
+    'B007-resume': {
+      state: 'IN_PROGRESS',
+      currentStation: 'SORTING',
+      completedQuantity: 100,
+      missingStations: [],
+      freshnessStatus: 'OK',
+      qualityIndicatorCount: 0,
+    },
+    B008: {
+      state: 'COMPLETED',
+      currentStation: 'DISPATCH',
+      completedQuantity: 97,
+      missingStations: [],
+      freshnessStatus: 'OK',
+      qualityIndicatorCount: 0,
+    },
+  } as const;
 
-    for (const fixture of Object.values(scenarios)) {
-      await canonicalizationService.ingestBatch(fixture.sourceRecords);
-      if (fixture.managementEvents.length > 0) {
-        await prisma.managementEvent.createMany({
-          data: fixture.managementEvents.map((event) => ({
-            ...event,
-            organizationId: TEST_ORGANIZATION_ID,
-          })),
-        });
+  it.each(Object.entries(scenarioExpectations))(
+    'resolves scenario %s to the expected batch status',
+    async (batchId, expected) => {
+      const scenarios = await buildBatchScenarios(prisma);
+
+      for (const fixture of Object.values(scenarios)) {
+        await canonicalizationService.ingestBatch(fixture.sourceRecords);
+        if (fixture.managementEvents.length > 0) {
+          await prisma.managementEvent.createMany({
+            data: fixture.managementEvents.map((event) => ({
+              ...event,
+              organizationId: TEST_ORGANIZATION_ID,
+            })),
+          });
+        }
       }
-    }
 
-    const expectations = {
-      B001: {
-        state: 'PLANNED',
-        currentStation: null,
-        completedQuantity: null,
-        missingStations: [],
-        freshnessStatus: 'NO_DATA',
-        qualityIndicatorCount: 0,
-      },
-      B002: {
-        state: 'IN_PROGRESS',
-        currentStation: 'RECEIVING',
-        completedQuantity: 100,
-        missingStations: [],
-        freshnessStatus: 'OK',
-        qualityIndicatorCount: 0,
-      },
-      B003: {
-        state: 'IN_PROGRESS',
-        currentStation: 'WASHING',
-        completedQuantity: 95,
-        missingStations: ['SORTING'],
-        freshnessStatus: 'OK',
-        qualityIndicatorCount: 0,
-      },
-      B004: {
-        state: 'IN_PROGRESS',
-        currentStation: 'WASHING',
-        completedQuantity: 95,
-        missingStations: ['SORTING'],
-        freshnessStatus: 'OK',
-        qualityIndicatorCount: 0,
-      },
-      B005A: {
-        state: 'IN_PROGRESS',
-        currentStation: 'WASHING',
-        completedQuantity: 50,
-        missingStations: ['RECEIVING', 'SORTING'],
-        freshnessStatus: 'OK',
-        qualityIndicatorCount: 0,
-      },
-      B005B: {
-        state: 'IN_PROGRESS',
-        currentStation: 'SORTING',
-        completedQuantity: 30,
-        missingStations: ['RECEIVING'],
-        freshnessStatus: 'OK',
-        qualityIndicatorCount: 0,
-      },
-      B006: {
-        state: 'IN_PROGRESS',
-        currentStation: 'DISPATCH',
-        completedQuantity: null,
-        missingStations: [],
-        freshnessStatus: 'OK',
-        qualityIndicatorCount: 1,
-      },
-      B007: {
-        state: 'BLOCKED',
-        currentStation: 'SORTING',
-        completedQuantity: 100,
-        missingStations: [],
-        freshnessStatus: 'OK',
-        qualityIndicatorCount: 0,
-      },
-      'B007-resume': {
-        state: 'IN_PROGRESS',
-        currentStation: 'SORTING',
-        completedQuantity: 100,
-        missingStations: [],
-        freshnessStatus: 'OK',
-        qualityIndicatorCount: 0,
-      },
-      B008: {
-        state: 'COMPLETED',
-        currentStation: 'DISPATCH',
-        completedQuantity: 97,
-        missingStations: [],
-        freshnessStatus: 'OK',
-        qualityIndicatorCount: 0,
-      },
-    } as const;
-
-    for (const [batchId, expected] of Object.entries(expectations)) {
       const result = await productionDomainService.getBatchStatus(batchId, NOW);
       expect(result.state).toBe(expected.state);
       expect(result.currentStation).toBe(expected.currentStation);
@@ -197,8 +207,8 @@ describe('Batch lifecycle (Step 5, real Postgres)', () => {
       expect(result.qualityIndicators).toHaveLength(
         expected.qualityIndicatorCount,
       );
-    }
-  });
+    },
+  );
 
   it('idempotent recompute: re-running ingestAndRecompute with the same record does not duplicate the canonical event', async () => {
     const batchId = 'B-IDEMPOTENT';

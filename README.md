@@ -378,6 +378,28 @@ task này).
   `DATABASE_URL`. Tạo `backend/.env` từ `.env.example` (dev credential mặc
   định `celesnity/celesnity`, không phải secret thật, đã có sẵn trong
   `.env.example` đã commit).
+- `tsconfig.build.json` thiếu `"prisma"` trong `exclude` — phát hiện khi
+  build/chạy thử ở máy có Docker. `prisma/seed.ts` import
+  `test/fixtures/batch-scenarios.ts`; `exclude` chỉ chặn file bị match trực
+  tiếp bởi include glob ban đầu, KHÔNG chặn được file bị kéo vào compile
+  qua import graph từ 1 file chưa bị exclude — nên khi `prisma/` chưa nằm
+  trong `exclude`, `seed.ts` là root file hợp lệ, kéo theo cả `test/` vào
+  cùng chương trình biên dịch với `src/`. Không có `rootDir` tường minh nên
+  tsc tự suy nó thành thư mục cha chung của `src/`, `test/`, `prisma/`
+  (tức `backend/`) thay vì chỉ `src/`, khiến `dist/` bị lồng thêm 1 cấp
+  (`dist/src/main.js` thay vì `dist/main.js`) — container chạy
+  `CMD ["node", "dist/main.js"]` báo `MODULE_NOT_FOUND`. Sửa bằng cách
+  thêm `"prisma"` vào `exclude` của `tsconfig.build.json`: không có file
+  nào trong `src/` import ngược lại `prisma/seed.ts`, nên loại nó khỏi tập
+  root file cũng loại luôn nhánh import sang `test/` khỏi compile.
+- `jest` bị cài lên `30.x` (không tương thích `ts-jest@^29.2.5` repo đang
+  dùng) trong lúc cài lại dependency ở máy có Docker — ghim lại
+  `jest@^29.7.0` trong `package.json` để khớp đúng `ts-jest`. Máy Windows
+  không-Docker (nơi phần lớn code Step 1–5 được viết) vẫn còn
+  `node_modules/jest@30.5.1` từ lần cài ban đầu, chưa `npm install` lại
+  nên chưa tự đồng bộ theo `package.json` mới — không phải vấn đề vì
+  `npm run test` vẫn chạy được bình thường ở đó, chỉ cần lưu ý lần
+  `npm install` kế tiếp trên máy đó sẽ tự hạ về `29.7.0`.
 
 **Quyết định phát sinh:**
 - `NewSourceRecordInput` KHÔNG đơn thuần là "SourceRecordInput trừ `id`"
