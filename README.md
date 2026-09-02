@@ -35,29 +35,39 @@ lập bằng `docker compose up` như trên máy local bình thường.
 
 ## Trạng thái hiện tại
 
-Đang ở **Day 3 / 4**. Kiến trúc đầy đủ, data model, và Domain Rules v2.2 được
-ghi chi tiết trong [`docs/plan-v4.md`](docs/plan-v4.md) — đó là tài liệu tham
-chiếu chính, không lặp lại ở đây.
+Đã xong Step 1–5 trong kế hoạch (code). Kiến trúc đầy đủ, data model, và
+Domain Rules v2.2 được ghi chi tiết trong
+[`docs/plan-v4.md`](docs/plan-v4.md) — đó là tài liệu tham chiếu chính,
+không lặp lại ở đây.
 
-Schema Postgres (9 bảng, Prisma) đã viết xong ở `backend/prisma/schema.prisma`
-nhưng **chưa chạy migration thật** — máy code hôm nay không có Docker sống.
-Xem mục [Việc cần làm ở máy có Docker](#việc-cần-làm-ở-máy-có-docker) bên
-dưới.
+- Schema Postgres (9 bảng, Prisma, `backend/prisma/schema.prisma`) đã
+  migrate và verify constraint/FK thật trên máy có Docker.
+- Canonicalization pipeline (Rule 1–5b,
+  `backend/src/modules/canonicalization/`) và production-domain logic
+  (Rule 6–7, `backend/src/modules/production-domain/`) đã viết xong dưới
+  dạng pure function (test bằng Jest trên mock data, `npm run test`), **và**
+  đã wire Prisma Client thật (`CanonicalizationService.ingestAndRecompute`/
+  `ingestBatch`, `ProductionDomainService.getBatchStatus`) với integration
+  test riêng chạy trên Postgres thật (`npm run test:e2e`).
+- Integration test/seed script (Step 5) đã viết xong, đã tự verify được
+  wiring đúng cấu trúc (typecheck/lint sạch, chạy đúng tới bước gọi DB thật)
+  nhưng **chưa từng chạy thành công lần nào** — máy code lúc đó Docker
+  Desktop đang tắt. Xem mục
+  [Việc cần làm ở máy có Docker](#việc-cần-làm-ở-máy-có-docker) bên dưới,
+  còn 1 việc chưa tick.
+- **Chưa làm**: collector thật (Application API/Production Database/
+  Supplier Crawler — nguồn dữ liệu thật cho `ingestAndRecompute`),
+  `ManagementEventsModule` ghi thật (POST block/resume/ack/note), và UI —
+  đều là bước tiếp theo sau Step 5.
 
-Canonicalization pipeline (Rule 1–5b) đã viết xong ở
-`backend/src/modules/canonicalization/` dưới dạng pure function, test bằng
-Jest trên mock data trong bộ nhớ — **chưa wire Prisma Client thật** vào
-service (chưa query DB thật); việc đó cùng `ProductionDomainModule` (Rule
-6–7) để dành Step 4 trên máy có Docker.
+Backend là modular monolith NestJS, 5 module nghiệp vụ:
 
-Backend là modular monolith NestJS, hiện có 5 module nghiệp vụ (đang rỗng,
-chưa có entity/logic thật):
-
-- `SourcesModule`
-- `CollectionRunsModule`
-- `CanonicalizationModule`
-- `ProductionDomainModule`
-- `ManagementEventsModule`
+- `SourcesModule` — rỗng, chưa có logic (collector thật, bước sau)
+- `CollectionRunsModule` — rỗng, chưa có logic (collector thật, bước sau)
+- `CanonicalizationModule` — có pipeline Rule 1–5b + wiring Prisma thật
+- `ProductionDomainModule` — có logic Rule 6–7 + wiring Prisma thật
+- `ManagementEventsModule` — rỗng, chưa ghi được (chỉ đọc management_events
+  qua Prisma trực tiếp trong test/seed hôm nay)
 
 ## Nhật ký triển khai
 
@@ -226,18 +236,202 @@ chưa có entity/logic thật):
   cách này để nhất quán 1 quy tắc tie-break duy nhất xuyên suốt pipeline thay
   vì có 2 quy tắc khác nhau cho 2 tình huống.
 
+### Step 4 — 2026-09-02
+
+Đặt tên "Step 4" thay vì "Day 4" — bước này nối tiếp Step 3 trong cùng kế
+hoạch, không nhất thiết là ngày lịch riêng biệt (xem ghi chú đầu bài của
+task này).
+
+**Đã làm:**
+- **Refactor sót từ Step 3**: đổi tên `SourceLinkResult.sourceRecordId` →
+  `sourceRecordPk` trong `canonicalization/types.ts`, cập nhật mọi chỗ dùng
+  ở `canonicalization.pipeline.ts` và `canonicalization.pipeline.spec.ts`.
+  Lý do: tên cũ trùng ký tự với `SourceRecordInput.sourceRecordId` (business
+  identifier, Rule 1) nhưng giá trị thực chất luôn là
+  `SourceRecordInput.id` (internal PK) — dễ gây nhầm lẫn khi đọc code sau
+  này. Tên mới khớp đúng tên cột `canonical_event_sources.source_record_pk`
+  trong `prisma/schema.prisma`. Refactor thuần đổi tên, không đổi giá trị —
+  9 test case cũ của Step 3 vẫn pass nguyên sau khi đổi.
+- Viết production-domain logic thuần TypeScript trong
+  `backend/src/modules/production-domain/`, cover Rule 6–7
+  (`docs/plan-v4.md`, Domain Rules v2.2):
+  - `types.ts` — `ManagementEventInput`, `BatchState`, `BatchStatusResult`;
+    tái sử dụng `Station`/`CanonicalEventResult` từ
+    `canonicalization/types.ts` thay vì định nghĩa lại.
+  - `station-order.ts` — `STATION_ORDER` (6 bước) + `stationIndex`.
+  - `batch-state.ts` — pure function: `getCurrentStation` (Rule 6),
+    `getMissingStations`, `resolveIsBlocked`, `resolveBatchState` (Rule 7,
+    đúng thứ tự ưu tiên COMPLETED → BLOCKED → IN_PROGRESS → PLANNED),
+    `getCompletedQuantity` (Rule 3).
+  - `freshness.ts` — `calculateFreshness`, dựa trên `eventTime` của event
+    ACCEPTED gần nhất (không phải currentStation, không phải `receivedAt`).
+  - `production-domain.service.ts` — service mỏng gộp các hàm trên thành 1
+    `getBatchStatus(...)`, nhận input trực tiếp qua tham số, không query
+    Prisma.
+- `batch-state.spec.ts` (8 case: B001, B002, B003, B004, B006, B007,
+  B007-resume, B008) + `freshness.spec.ts` (4 case: NO_DATA, OK, STALE,
+  CONFLICT-không-tính) — tổng 12 case bắt buộc, tất cả pass qua
+  `npm run test` (22/22 test toàn backend).
+- `npx tsc --noEmit` và `npx eslint` trên toàn bộ `canonicalization/` và
+  `production-domain/` chạy sạch.
+
+**Vấn đề gặp phải:**
+- Không có vấn đề kỹ thuật mới đáng ghi lại — `eslint --fix` lần này không
+  gây lệch với `tsc` như Step 3 (đã rerun cả hai sau `--fix` để chắc chắn).
+
+**Quyết định phát sinh:**
+- `getBatchStatus` nhận thêm tham số `batchId: string` tường minh (đứng đầu
+  danh sách tham số), dù mô tả nhiệm vụ liệt kê chữ ký không có `batchId`.
+  Lý do: `BatchStatusResult.batchId` là field bắt buộc, nhưng một batch
+  PLANNED hợp lệ có `events = []` — không có cách nào suy ra `batchId` từ
+  mảng event rỗng. Test bắt buộc chỉ nhắm vào `batch-state.ts`/`freshness.ts`
+  (không có `production-domain.service.spec.ts` nào được yêu cầu), nên thay
+  đổi chữ ký ở service không ảnh hưởng Definition of Done.
+- `resolveBatchState`'s điều kiện IN_PROGRESS chỉ xét event ở RECEIVING đến
+  FOLDING (loại DISPATCH ra, đúng theo mô tả nhiệm vụ) — hệ quả phụ: 1 batch
+  mà canonical event DUY NHẤT là DISPATCH CONFLICT (không có trạm nào trước
+  đó từng ghi nhận) sẽ đọc ra `PLANNED` thay vì `IN_PROGRESS`, dù Rule 6 vẫn
+  tính `currentStation = DISPATCH` cho batch đó. Đây là hệ quả trực tiếp của
+  literal spec được giao (không tự suy diễn thêm điều kiện), và không xảy
+  ra trong fixture 8-batch thật (DISPATCH luôn có trạm trước đó). Ghi chú
+  lại trong comment của `resolveBatchState` để không ai bất ngờ khi gặp case
+  này sau này.
+- `staleThresholdMinutes` mặc định 15 đặt ở tầng service
+  (`production-domain.service.ts`), không đặt default ngay trong
+  `calculateFreshness` — giữ pure function ở `freshness.ts` luôn nhận tham
+  số tường minh (nhất quán với chủ trương "không dùng `new Date()` ngầm"
+  của toàn bộ pure-function layer), default value chỉ là convenience ở lớp
+  gọi ngoài cùng.
+
+### Step 5 — 2026-09-02
+
+**Đã làm:**
+- `backend/src/prisma/prisma.service.ts` + `prisma.module.ts` (`@Global()`)
+  — `PrismaService extends PrismaClient`, connect/disconnect theo
+  `OnModuleInit`/`OnModuleDestroy`. Import vào `AppModule`, tách biệt hoàn
+  toàn với `DatabaseModule` (`pg.Pool`) của Step 1 — 2 đường kết nối độc
+  lập, `DatabaseModule` vẫn chỉ phục vụ `/health`.
+- `CanonicalizationService.ingestAndRecompute`/`ingestBatch`: insert 1
+  `source_records`, query lại TOÀN BỘ record cùng `batch_id+station`, gọi
+  `resolveGroup` (nguyên si từ Step 3), upsert `canonical_events` theo
+  `canonical_key`, xoá + insert lại `canonical_event_sources` — tất cả
+  trong 1 `$transaction`.
+- `ProductionDomainService.getBatchStatus` (DB-backed, async): query
+  `batches`/`canonical_events`/`management_events` thật, suy ra
+  `acknowledged` từ `management_events` (không có cột riêng), gọi các hàm
+  thuần từ Step 4 (nguyên si) để tính state/currentStation/freshness.
+- `deriveQualityIndicators` (Step 3) đổi signature nhận thẳng
+  `CanonicalEventResult[]` thay vì `CanonicalizationResult[]` (không dùng
+  `.sources`) — cập nhật `canonicalize()` và 2 chỗ gọi trong
+  `canonicalization.pipeline.spec.ts`, 9 test case Step 3 vẫn pass.
+- `backend/test/fixtures/batch-scenarios.ts` — fixture builder dùng chung
+  cho cả integration test lẫn seed, dựng đủ 10 scenario (B001–B008, B005A,
+  B005B, B006) đúng dữ liệu đã dùng ở mock test Step 3/4, giờ insert được
+  qua Prisma (tự tạo `sources`/`collection_runs`/`work_orders`/`batches`
+  trước vì có FK thật).
+- `backend/test/batch-lifecycle.e2e-spec.ts` — 5 nhóm test case theo đúng
+  yêu cầu (10 scenario khớp bảng kỳ vọng; idempotent recompute; recompute
+  xét đủ lịch sử — record mới đè record cũ, PRIMARY/SUPERSEDED đúng; B006 +
+  ACK_EXCEPTION — acknowledged=true nhưng state không đổi; batchId không
+  tồn tại → `NotFoundException`). `beforeEach` TRUNCATE 8 bảng liên quan.
+- `backend/prisma/seed.ts` + script `npm run seed` — dùng lại fixture
+  builder, ingest cả 10 scenario vào DB dev thật, không truncate trước.
+- Chạy thử offline (không cần DB, chỉ để xác nhận wiring đúng cấu trúc,
+  KHÔNG phải verify integration thật): `npx tsc --noEmit` sạch toàn repo,
+  `npm run test` (unit Step 3/4) vẫn 22/22 pass, `npm run seed` và
+  `npm run test:e2e` đều chạy đúng tới bước gọi Postgres thật và dừng lại ở
+  `Can't reach database server at localhost:5433` — đúng như kỳ vọng vì máy
+  này Docker Desktop KHÔNG chạy (xem "Vấn đề gặp phải"), không phải lỗi
+  code.
+
+**Vấn đề gặp phải:**
+- Task mô tả máy này "CÓ Docker chạy được" nhưng thực tế Docker Desktop
+  không chạy (`docker ps` báo lỗi không kết nối được named pipe daemon,
+  process `Docker Desktop.exe` không tồn tại). Đã hỏi và được xác nhận: cứ
+  viết code trước, verify integration/seed thật để dành khi Docker được
+  bật (xem mục checklist bên dưới, còn 1 việc chưa tick).
+- `npx prisma generate` cần chạy lại (bản cũ trong `node_modules/.prisma`
+  từ lúc `npm install prisma` ban đầu ở Step 2 đã cũ hơn `schema.prisma`
+  hiện tại) — chạy lại `npx prisma generate` (offline, không cần DB) trước
+  khi viết code dùng `@prisma/client`.
+- `npm run test:e2e` (đã có sẵn từ Step 1, chưa ai từng chạy thử) lỗi ngay
+  từ đầu, KHÔNG liên quan gì tới code Step 5: `@nestjs/config` là package
+  ESM-only (`"type": "module"`), trong khi `test/jest-e2e.json` compile
+  test file sang CommonJS qua `ts-jest` — Jest mặc định bỏ qua
+  `node_modules` khi transform (`transformIgnorePatterns` mặc định), nên
+  `require()` một package ESM-only từ code đã compile CommonJS bị Node từ
+  chối thẳng. Lỗi này có sẵn từ khi `test/app.e2e-spec.ts` được Nest CLI
+  scaffold ở Step 1 (import `AppModule` → `ConfigModule` từ `@nestjs/config`),
+  chỉ là chưa ai chạy `test:e2e` để phát hiện. Sửa bằng cách thêm
+  `"transformIgnorePatterns": []` vào `test/jest-e2e.json` (cho phép Jest
+  transform cả `node_modules`) — đây là sửa `test/jest-e2e.json`, không phải
+  `npm run test` (script unit Step 3/4, được yêu cầu giữ nguyên và vẫn giữ
+  nguyên, 22/22 pass).
+- `backend/Dockerfile` copy `package*.json` + `npm ci` TRƯỚC khi copy
+  `prisma/schema.prisma` — postinstall của `@prisma/client` (chạy lúc
+  `npm ci`) sẽ không thấy schema nên bỏ qua, và `npm run build` (`nest
+  build`) không tự chạy `prisma generate`, nên image build ra sẽ dùng
+  Prisma Client rỗng/cũ → lỗi compile. Thêm dòng `RUN npx prisma generate`
+  sau `COPY . .`, trước `RUN npm run build`.
+- `backend/.env` chưa tồn tại trên máy này (chỉ có `.env.example`, `.env`
+  bị gitignore) — Prisma CLI/integration test/seed script cần
+  `DATABASE_URL`. Tạo `backend/.env` từ `.env.example` (dev credential mặc
+  định `celesnity/celesnity`, không phải secret thật, đã có sẵn trong
+  `.env.example` đã commit).
+
+**Quyết định phát sinh:**
+- `NewSourceRecordInput` KHÔNG đơn thuần là "SourceRecordInput trừ `id`"
+  như mô tả nhiệm vụ: bớt `sourceType` (không phải cột thật của
+  `source_records`, được suy ra qua JOIN với `sources.type` lúc đọc lại —
+  đưa nó vào type ghi sẽ tạo khả năng giá trị lệch với `sources.type` thật),
+  thêm `collectionRunId` (FK NOT NULL bắt buộc của Step 2 schema, không có
+  cách nào khác để cung cấp). Ghi rõ lý do trong comment tại `types.ts`.
+- `source_records.payload` (jsonb) chưa có collector thật nên chưa có raw
+  payload thật — service tự sinh `{ quantity }` làm payload tối thiểu, đủ
+  để đọc lại `quantity` khi recompute. Sẽ được thay bằng payload thật khi
+  có collector (step sau).
+- Đổi tên method thuần của Step 4 `ProductionDomainService.getBatchStatus`
+  (sync, nhận sẵn events/managementEvents) thành `computeBatchStatus`, để
+  tên `getBatchStatus` (async, DB-backed) là API chính callers sẽ dùng.
+  Đổi tên thuần tuý, KHÔNG đổi logic bên trong; an toàn vì Step 4 không có
+  spec nào gọi method theo tên cũ (chỉ test trực tiếp `batch-state.ts`/
+  `freshness.ts`).
+- "cùng station" khi tra `ACK_EXCEPTION` (mô tả nhiệm vụ) được suy giảm
+  thành "cùng batch, timestamp sau `updated_at` của canonical_event đó" vì
+  `management_events` không có cột station trong schema thật (Step 2) —
+  trong phạm vi các scenario đang có, mỗi batch tối đa 1 conflict sống tại
+  1 thời điểm nên 2 cách diễn giải cho kết quả giống hệt nhau.
+- `docker-compose.yml`: thêm `DATABASE_URL` vào `environment` của service
+  `backend` (trỏ `postgres:5432` — port nội bộ mạng Docker, khác port 5433
+  remap ra host) — cần thiết để `PrismaService` kết nối được khi backend
+  chạy trong container, task không nhắc tới file này nhưng thiếu nó thì
+  container backend sẽ crash ngay khi `PrismaModule` gọi `$connect()`.
+
 ## Việc cần làm ở máy có Docker
 
 Checklist thủ công — làm ở máy laptop có Docker chạy được, sau khi pull code
 mới nhất:
 
-- [ ] Pull code mới nhất
-- [ ] `docker compose up --build` (nhớ postgres đã remap host port 5433)
-- [ ] `cd backend && npx prisma migrate dev --name init_schema`
-- [ ] Verify unique constraint trên `canonical_events.canonical_key` (thử
-      insert trùng key, phải bị Postgres từ chối)
-- [ ] Verify FK đúng hướng (sources <- collection_runs <- source_records;
+- [x] Pull code mới nhất
+- [x] `docker compose up --build` (nhớ postgres đã remap host port 5433)
+- [x] `cd backend && npx prisma migrate dev --name init_schema`
+- [x] Verify unique constraint trên `canonical_events.canonical_key` (thử
+      insert trùng key, phải bị Postgres từ chối) — đã xác nhận qua `\d`
+      psql trước khi Step 4 bắt đầu.
+- [x] Verify FK đúng hướng (sources <- collection_runs <- source_records;
       batches <- canonical_event_sources qua canonical_events; work_orders
-      <- batches)
-- [ ] Verify source_records/canonical_events/management_events.batch_id
-      KHÔNG có FK constraint tới batches (đúng chủ đích thiết kế)
+      <- batches) — đã xác nhận qua `\d` psql.
+- [x] Verify source_records/canonical_events/management_events.batch_id
+      KHÔNG có FK constraint tới batches (đúng chủ đích thiết kế) — đã xác
+      nhận qua `\d` psql.
+- [x] Wire Prisma Client thật vào `CanonicalizationService`/
+      `ProductionDomainService` + transaction insert→recompute→update
+      (Step 5 — code đã viết xong, đã typecheck/lint sạch; XEM MỤC DƯỚI —
+      chưa chạy thành công lần nào vì Docker Desktop tắt lúc code).
+- [ ] **Việc còn lại — làm ngay khi Docker chạy được**: `docker compose up
+      --build`, sau đó `cd backend && npm run test:e2e` — phải thấy cả 5
+      test case trong `batch-lifecycle.e2e-spec.ts` VÀ `app.e2e-spec.ts` cũ
+      pass (app.e2e-spec.ts trước đây timeout vì cùng lỗi ESM ở trên, giờ
+      nên tự pass). Sau đó thử `npm run seed` 1 lần, xác nhận không lỗi.
+      Nếu `test:e2e` fail vì lý do khác ngoài "không tới được DB", đó là
+      vấn đề thật cần sửa, không phải môi trường.

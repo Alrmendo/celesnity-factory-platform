@@ -147,7 +147,7 @@ export function resolveGroup(
   if (subgroups.length === 1) {
     const [{ representative }] = subgroups;
     const sources: SourceLinkResult[] = records.map((record) => ({
-      sourceRecordId: record.id,
+      sourceRecordPk: record.id,
       relationship:
         record === representative
           ? 'PRIMARY'
@@ -224,7 +224,7 @@ export function resolveGroup(
       topRelationships.get(record.id) ??
       lowerRelationships.get(record.id) ??
       (intraSourceLinks.get(record.id) as SourceRelationship);
-    return { sourceRecordId: record.id, relationship };
+    return { sourceRecordPk: record.id, relationship };
   });
 
   return {

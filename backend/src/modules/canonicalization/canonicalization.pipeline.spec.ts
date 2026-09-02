@@ -30,7 +30,7 @@ describe('canonicalization pipeline — Domain Rules v2.2 (Rule 1-5b)', () => {
       expect(result.event.quantity).toBe(100);
       expect(result.event.canonicalKey).toBe('B000:RECEIVING');
       expect(result.sources).toEqual([
-        { sourceRecordId: 'sr-1', relationship: 'PRIMARY' },
+        { sourceRecordPk: 'sr-1', relationship: 'PRIMARY' },
       ]);
     });
 
@@ -58,8 +58,8 @@ describe('canonicalization pipeline — Domain Rules v2.2 (Rule 1-5b)', () => {
       expect(result.event.quantity).toBe(50);
       expect(result.sources).toEqual(
         expect.arrayContaining([
-          { sourceRecordId: 'sr-2', relationship: 'PRIMARY' },
-          { sourceRecordId: 'sr-1', relationship: 'DUPLICATE' },
+          { sourceRecordPk: 'sr-2', relationship: 'PRIMARY' },
+          { sourceRecordPk: 'sr-1', relationship: 'DUPLICATE' },
         ]),
       );
     });
@@ -94,8 +94,8 @@ describe('canonicalization pipeline — Domain Rules v2.2 (Rule 1-5b)', () => {
       expect(result.event.canonicalKey).toBe('B005B:SORTING');
       expect(result.sources).toEqual(
         expect.arrayContaining([
-          { sourceRecordId: 'sr-2', relationship: 'PRIMARY' },
-          { sourceRecordId: 'sr-1', relationship: 'DUPLICATE' },
+          { sourceRecordPk: 'sr-2', relationship: 'PRIMARY' },
+          { sourceRecordPk: 'sr-1', relationship: 'DUPLICATE' },
         ]),
       );
     });
@@ -132,8 +132,8 @@ describe('canonicalization pipeline — Domain Rules v2.2 (Rule 1-5b)', () => {
       expect(result.event.quantity).toBe(200);
       expect(result.sources).toEqual(
         expect.arrayContaining([
-          { sourceRecordId: 'sr-db', relationship: 'PRIMARY' },
-          { sourceRecordId: 'sr-crawler', relationship: 'SUPERSEDED' },
+          { sourceRecordPk: 'sr-db', relationship: 'PRIMARY' },
+          { sourceRecordPk: 'sr-crawler', relationship: 'SUPERSEDED' },
         ]),
       );
     });
@@ -168,8 +168,8 @@ describe('canonicalization pipeline — Domain Rules v2.2 (Rule 1-5b)', () => {
       expect(result.event.canonicalKey).toBe('B006:DISPATCH');
       expect(result.sources).toEqual(
         expect.arrayContaining([
-          { sourceRecordId: 'sr-db', relationship: 'CONFLICT' },
-          { sourceRecordId: 'sr-api', relationship: 'CONFLICT' },
+          { sourceRecordPk: 'sr-db', relationship: 'CONFLICT' },
+          { sourceRecordPk: 'sr-api', relationship: 'CONFLICT' },
         ]),
       );
     });
@@ -204,8 +204,8 @@ describe('canonicalization pipeline — Domain Rules v2.2 (Rule 1-5b)', () => {
       expect(result.event.quantity).toBe(300);
       expect(result.sources).toEqual(
         expect.arrayContaining([
-          { sourceRecordId: 'sr-api', relationship: 'PRIMARY' },
-          { sourceRecordId: 'sr-db', relationship: 'DUPLICATE' },
+          { sourceRecordPk: 'sr-api', relationship: 'PRIMARY' },
+          { sourceRecordPk: 'sr-db', relationship: 'DUPLICATE' },
         ]),
       );
     });
@@ -273,7 +273,7 @@ describe('canonicalization pipeline — Domain Rules v2.2 (Rule 1-5b)', () => {
       };
 
       const result = resolveGroup([dbRecord, apiRecord]);
-      const indicators = deriveQualityIndicators([result]);
+      const indicators = deriveQualityIndicators([result.event]);
 
       expect(indicators).toEqual([
         {
@@ -299,7 +299,7 @@ describe('canonicalization pipeline — Domain Rules v2.2 (Rule 1-5b)', () => {
 
       const result = resolveGroup([record]);
 
-      expect(deriveQualityIndicators([result])).toEqual([]);
+      expect(deriveQualityIndicators([result.event])).toEqual([]);
     });
   });
 });

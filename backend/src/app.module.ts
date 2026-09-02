@@ -3,6 +3,7 @@ import { ConfigModule } from '@nestjs/config';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { DatabaseModule } from './database/database.module';
+import { PrismaModule } from './prisma/prisma.module';
 import { SourcesModule } from './modules/sources/sources.module';
 import { CollectionRunsModule } from './modules/collection-runs/collection-runs.module';
 import { CanonicalizationModule } from './modules/canonicalization/canonicalization.module';
@@ -14,6 +15,7 @@ import { HealthModule } from './health/health.module';
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
     DatabaseModule,
+    PrismaModule,
     SourcesModule,
     CollectionRunsModule,
     CanonicalizationModule,

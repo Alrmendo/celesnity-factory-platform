@@ -30,6 +30,10 @@ services:
       DB_USER: ${DB_USER:-celesnity}
       DB_PASSWORD: ${DB_PASSWORD:-celesnity}
       DB_NAME: ${DB_NAME:-celesnity}
+      # Prisma (Step 5) reads a single connection string — internal Docker
+      # network port (5432), not the 5433 host-side remap used outside the
+      # container.
+      DATABASE_URL: postgresql://${DB_USER:-celesnity}:${DB_PASSWORD:-celesnity}@postgres:5432/${DB_NAME:-celesnity}
     ports:
       - "3001:3001"
     depends_on:
