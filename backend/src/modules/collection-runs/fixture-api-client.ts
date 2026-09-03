@@ -2,7 +2,26 @@
 // Deliberately isolated from CollectionRunsService: this file only knows
 // how to make ONE request and classify its outcome; retry/backoff policy
 // lives entirely in the service.
-
+//
+// Uses `fetch` explicitly imported from `undici`, NOT the ambient global
+// `fetch` (Node 18+ exposes one, and — this is exactly what made the bug
+// pass review — it typechecks fine, since @types/node declares the global
+// unconditionally regardless of whether the runtime value is actually
+// bound in a given realm). See README.md's Step 6 log for what's actually
+// verified about the "fetch is not defined" failure vs. what isn't: it did
+// NOT reproduce locally under this repo's exact `npm run test:e2e` config
+// (Node 24.16.0, Jest 29.7.0 — `fetch` was defined there), so the specific
+// Node/Jest version combination that hit it on the Docker machine is
+// unconfirmed. What's true regardless of that mechanism: Node's global
+// `fetch` is still documented as experimental and is a per-realm global,
+// not a language guarantee — relying on it being bound in whatever
+// process/environment ends up running this (a real container, a `vm`
+// sandbox, a differently-versioned host) is inherently fragile in a way an
+// explicit import isn't. `undici` is Node's own reference fetch
+// implementation as an installable package — same API, but a real
+// imported function rather than a global lookup, so it can't be missing
+// regardless of realm or Node/Jest version.
+import { fetch } from 'undici';
 import { Station } from '../canonicalization/types';
 
 export interface FixtureEvent {

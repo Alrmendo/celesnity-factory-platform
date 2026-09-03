@@ -626,6 +626,41 @@ pass/fail. Không tự chạy được ở máy này (không có Docker) — ch�
 `bash -n` + review theo route/type thật trong code, xem chi tiết trong
 comment đầu file script.
 
+### Step 6 — sửa 2 bug từ log Docker thật đầu tiên — 2026-09-03
+
+Lần chạy `verify-step6.sh` đầu tiên trên máy có Docker báo FAILED, 2 bug
+thật (bug thứ 3, Prisma `Unknown argument errorMessage`, đang xử lý riêng
+qua `npx prisma migrate status`, KHÔNG đụng ở đây):
+- **`fetch is not defined`**: `fixture-api-client.ts` gọi `fetch()` toàn
+  cục — đổi sang `import { fetch } from 'undici'` (thêm `undici` vào
+  `backend/package.json` dependencies) thay vì dựa vào global. Đã thử tái
+  hiện offline bằng đúng config `npm run test:e2e` của repo này
+  (`test/jest-e2e.json`, Jest 29.7.0) trên Node 24.16.0 ở máy này —
+  **KHÔNG tái hiện được** (`fetch` có sẵn), nên chưa xác nhận được chính
+  xác cơ chế/version nào gây lỗi thật trên máy Docker; global `fetch` của
+  Node vẫn đang ở trạng thái experimental và là 1 global theo từng realm,
+  không phải bảo đảm ngôn ngữ — dùng `undici` nhập tường minh loại bỏ hẳn
+  sự phụ thuộc đó bất kể realm/version nào chạy code, không chỉ vá 1
+  trường hợp cụ thể. Xem comment đầu `fixture-api-client.ts`.
+- **`Cannot POST /sources` (404)**: kiểm tra lại kỹ — route trong
+  `sources.controller.ts` (`@Controller('sources')` + `@Post()` không path)
+  và `main.ts` (không `setGlobalPrefix`) đều đúng, route trong
+  `verify-step6.sh` cũng đã đúng từ trước, **không có bug route trong
+  code**. Nguyên nhân thật nhiều khả năng nhất: container `backend` lúc đó
+  chạy image cũ (build trước khi `SourcesController` có handler thật ở
+  Step 6 — bản cũ là `@Controller('sources')` rỗng, tự 404 mọi method).
+  Sửa bằng cách thêm bước preflight vào script: `docker compose up -d
+  --build` ép rebuild 3 service mỗi lần chạy, cộng vòng lặp chờ `GET
+  /health` trả 200 trước khi vào 3 bước verify chính — loại bỏ nguyên lớp
+  lỗi này thay vì dựa vào việc người chạy tự nhớ `--build`.
+
+**Trạng thái: CHƯA verify lại thật** — cả 2 chỗ trên chỉ mới verify offline
+(`tsc --noEmit`, `eslint`, `npm run test` sạch; `bash -n` sạch cho script;
+`fetchFixtureEvents` đã smoke-test lại bằng `ts-node` thật gọi HTTP thật
+tới `fixture-api/server.js` in-process — không cần Docker, xác nhận code
+chạy đúng logic). Phải chạy lại `npm run verify:step6` trên máy Docker
+thật để xác nhận cả 2 bug đã hết và log FAILED cũ không còn lặp lại.
+
 ## Việc cần làm ở máy có Docker
 
 Checklist thủ công — làm ở máy laptop có Docker chạy được, sau khi pull code

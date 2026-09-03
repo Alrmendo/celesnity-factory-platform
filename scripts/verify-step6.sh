@@ -1,11 +1,7 @@
 #!/usr/bin/env bash
 # Single-command Step 6 Docker verification — run ONLY on a machine with
 # Docker actually working (this repo was largely written on one that
-# didn't; see README.md's "Việc cần làm ở máy có Docker"). Requires
-# `docker compose up -d --build` already running for postgres/backend/
-# fixture-api before this script is invoked — it verifies, it doesn't
-# start the stack (starting it can take a while and belongs under the
-# user's own control, not silently inside a "verify" script).
+# didn't; see README.md's "Việc cần làm ở máy có Docker").
 #
 # Usage: npm run verify:step6   (from backend/, or `bash scripts/verify-step6.sh`
 #         from anywhere — paths below are resolved relative to this file,
@@ -28,6 +24,22 @@
 # below) — this script deliberately does NOT `set -e`, so a hiccup in
 # stage 1 or 3 doesn't abort stage 2, and a stage-3 problem doesn't get
 # silently reported as if it were a test failure or vice versa.
+#
+# Preflight (before the 3 numbered stages): `docker compose up -d --build`
+# for backend/postgres/fixture-api, then a poll loop on GET /health until
+# the backend actually answers. Added after a real Docker run got
+# "Cannot POST /sources" (404) from stage 3, even though the route is and
+# was already correct — @Controller('sources') + bare @Post() in
+# sources.controller.ts, no app.setGlobalPrefix() anywhere in main.ts (see
+# README.md's Step 6 log for the exact grep proving this). The earlier
+# version of this script assumed the caller had already run
+# `docker compose up -d --build` themselves; the far more likely real
+# explanation for that 404 is that the running "backend" container was
+# still serving an older image (built before Step 6's controllers existed
+# — the pre-Step-6 SourcesController was a bare `@Controller('sources')`
+# with NO handlers at all, which 404s on every method exactly like this).
+# Forcing the rebuild here removes that failure mode by construction
+# instead of relying on the operator to remember `--build` every time.
 
 set -uo pipefail
 
@@ -97,6 +109,27 @@ echo "==================================================================="
 echo "Step 6 verification run — $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 echo "Log file: $LOG_FILE"
 echo "==================================================================="
+
+# --- Preflight: force-rebuild + wait for backend to actually be ready ----
+echo
+echo "--- [preflight] docker compose up -d --build (backend, postgres, fixture-api) ---"
+(cd "$ROOT_DIR" && docker compose up -d --build backend postgres fixture-api)
+
+echo
+echo "Waiting for backend to answer GET ${BACKEND_URL}/health ..."
+BACKEND_READY=0
+for i in $(seq 1 60); do
+  HEALTH_CODE="$(curl -sS -o /dev/null -w '%{http_code}' "${BACKEND_URL}/health" 2>/dev/null || true)"
+  if [ "$HEALTH_CODE" = "200" ]; then
+    BACKEND_READY=1
+    echo "backend answered 200 on /health after ${i}s"
+    break
+  fi
+  sleep 1
+done
+if [ "$BACKEND_READY" -ne 1 ]; then
+  echo "!!! backend did not answer 200 on ${BACKEND_URL}/health within 60s — continuing to the 3 stages below anyway; whatever they report is the real, honest result of that (not swallowed here)."
+fi
 
 # --- 1. docker compose ps -------------------------------------------------
 echo
