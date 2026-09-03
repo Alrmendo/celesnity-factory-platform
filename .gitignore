@@ -33,3 +33,4 @@ frontend/.vercel
 
 # Nest
 backend/tmp/
+backup-*.sql
