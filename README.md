@@ -661,6 +661,64 @@ tới `fixture-api/server.js` in-process — không cần Docker, xác nhận co
 chạy đúng logic). Phải chạy lại `npm run verify:step6` trên máy Docker
 thật để xác nhận cả 2 bug đã hết và log FAILED cũ không còn lặp lại.
 
+### Step 6 — revert `undici`, quay lại global `fetch` — 2026-09-03
+
+Entry trên (`import { fetch } from 'undici'`) tự nó gây ra 1 bug MỚI, xác
+nhận qua log Docker thật lần 2: import `undici` (bản `8.10.1`, tự
+`npm view undici version` lấy "latest" lúc thêm, không kiểm tương thích) là
+`TypeError: webidl.util.markAsUncloneable is not a function` ném ra ngay
+lúc LOAD module (không phải lúc gọi `fetch()`), làm crash đúng 2/3 e2e
+suite: `app.e2e-spec.ts` và `collection-runs.e2e-spec.ts` (cả 2 import
+`AppModule`/`CollectionRunsService`, kéo theo `fixture-api-client.ts` →
+`undici`), còn `batch-lifecycle.e2e-spec.ts` (không import 2 thứ đó) thì
+không sao — khớp chính xác pattern "2/3" trong log, đã verify lại bằng
+`grep "^import"` trên cả 3 file (xem code review, không suy đoán). Cùng lúc
+đó, log container backend THẬT (`node dist/main.js`, Node 22-alpine) cho
+thấy chính đoạn `fetch()` đó chạy qua bình thường, không hề crash — nên đây
+là vấn đề của riêng việc load package `undici` trong Jest `node` test
+environment (1 vm context/realm khác với process chính), không phải fetch
+tự nó có vấn đề.
+
+**Quyết định: REVERT**, dựa trên bằng chứng thật, không suy đoán:
+- `npm ls undici --all` → chỉ 1 bản `undici@8.10.1` trong toàn bộ cây phụ
+  thuộc (dán output ở dưới) — nên đây KHÔNG phải va chạm 2 version của
+  package `undici` cài qua npm. Duplicate thật sự là giữa package `undici`
+  (mới thêm) và bản undici RIÊNG mà Node tự bundle nội bộ để cấp `fetch`
+  global — cái đó không hiện trong `npm ls` vì nó không nằm trong
+  `node_modules`, nó nằm trong chính Node runtime.
+  ```
+  $ npm ls undici --all
+  backend@0.0.1 C:\Users\Admin\Desktop\celesnity-factory-platform\backend
+  └── undici@8.10.1
+  ```
+- Dockerfile build log thật đã xác nhận `node:22-alpine` — Node 22 có
+  `fetch` global ổn định (hết "experimental" từ Node 21), không cần
+  dependency ngoài. Entry trước ghi "Node's global fetch vẫn đang ở trạng
+  thái experimental" — sai, không kiểm lại kỹ trước khi viết; sửa lại ở
+  đây cho đúng.
+- Nguyên nhân THẬT của lỗi "fetch is not defined" ban đầu (Lỗi 2, entry
+  trước) và "Cannot POST /sources" (Lỗi 3) rất có thể là CÙNG 1 nguyên
+  nhân đã xác nhận cho Lỗi 3: container `backend` chạy image cũ, build
+  trước khi có code Step 6 — không liên quan gì tới fetch có tồn tại hay
+  không. `scripts/verify-step6.sh` đã có bước preflight rebuild (`docker
+  compose up -d --build` + chờ `/health` 200) giải quyết đúng nguyên nhân
+  này rồi — không cần workaround riêng cho fetch nữa.
+- Đã xoá `undici` khỏi `backend/package.json` (`npm uninstall undici`),
+  `fixture-api-client.ts` quay lại dùng thẳng `fetch` global (không import
+  gì thêm) — xem comment đầu file để biết đầy đủ lý do, tránh ai đó đọc
+  code sau này lại "sửa lại" giống lần trước.
+
+Verify offline sau khi revert: `tsc --noEmit`/`eslint`/`npm run test`
+(22/22) đều sạch; thêm 1 probe tạm (`test/zz-module-load-probe.e2e-spec.ts`,
+đã xoá sau khi verify) chạy qua đúng config `test/jest-e2e.json` — xác nhận
+import `fixture-api-client.ts` + `AppModule` không còn crash lúc load
+module nữa (không cần Postgres cho việc này, chỉ là import).
+
+**Trạng thái: VẪN "CHƯA verify lại thật"** — chỉ mới verify offline như
+trên. Phải chạy lại `npm run verify:step6` trên máy Docker thật mới biết
+chắc cả 3 lỗi (fetch/undici, routing 404, và lỗi Prisma `error_message`
+đang xử lý riêng) đã hết thật hay chưa.
+
 ## Việc cần làm ở máy có Docker
 
 Checklist thủ công — làm ở máy laptop có Docker chạy được, sau khi pull code

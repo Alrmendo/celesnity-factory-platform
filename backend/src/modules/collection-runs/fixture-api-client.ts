@@ -3,25 +3,34 @@
 // how to make ONE request and classify its outcome; retry/backoff policy
 // lives entirely in the service.
 //
-// Uses `fetch` explicitly imported from `undici`, NOT the ambient global
-// `fetch` (Node 18+ exposes one, and — this is exactly what made the bug
-// pass review — it typechecks fine, since @types/node declares the global
-// unconditionally regardless of whether the runtime value is actually
-// bound in a given realm). See README.md's Step 6 log for what's actually
-// verified about the "fetch is not defined" failure vs. what isn't: it did
-// NOT reproduce locally under this repo's exact `npm run test:e2e` config
-// (Node 24.16.0, Jest 29.7.0 — `fetch` was defined there), so the specific
-// Node/Jest version combination that hit it on the Docker machine is
-// unconfirmed. What's true regardless of that mechanism: Node's global
-// `fetch` is still documented as experimental and is a per-realm global,
-// not a language guarantee — relying on it being bound in whatever
-// process/environment ends up running this (a real container, a `vm`
-// sandbox, a differently-versioned host) is inherently fragile in a way an
-// explicit import isn't. `undici` is Node's own reference fetch
-// implementation as an installable package — same API, but a real
-// imported function rather than a global lookup, so it can't be missing
-// regardless of realm or Node/Jest version.
-import { fetch } from 'undici';
+// Uses Node's ambient global `fetch` (no import — see README.md's Step 6
+// log for the full story, condensed here). This file briefly imported
+// `fetch` from the standalone `undici` npm package instead, to work around
+// a "fetch is not defined" failure seen on the Docker machine. That was
+// reverted:
+//  - The real Docker build log confirms `backend/Dockerfile` runs on
+//    `node:22-alpine`. Node's fetch has been stable (no flag, no warning)
+//    since Node 21 — Node 22 always has it. There's no version gap here to
+//    work around.
+//  - The ORIGINAL "fetch is not defined" report and the separately-found
+//    "Cannot POST /sources" 404 (see collection-runs.controller.ts / the
+//    Step 6 log) turned out to share one root cause: the running `backend`
+//    container was serving an image built BEFORE this Step 6 code existed.
+//    `scripts/verify-step6.sh` now force-rebuilds before verifying, which
+//    addresses this directly — no fetch workaround needed.
+//  - Explicitly importing `undici` made things WORSE: it crashed 2 of the
+//    3 e2e suites at module-load time (`TypeError: webidl.util.
+//    markAsUncloneable is not a function`, thrown from undici's own
+//    `CacheStorage` setup code, executed as a side effect of merely
+//    importing the package) — specifically `app.e2e-spec.ts` and
+//    `collection-runs.e2e-spec.ts`, both of which import `AppModule` (or
+//    `CollectionRunsService` directly), pulling this file in transitively;
+//    `batch-lifecycle.e2e-spec.ts` imports neither and was unaffected —
+//    exactly the "2/3" failure pattern reported. The SAME code, in the
+//    SAME Docker container's real `node dist/main.js` process, ran the
+//    `fetch()` call successfully — so this was specific to loading the
+//    `undici` package inside Jest's `node` test environment (a separate vm
+//    realm from the main process), not a problem with fetch itself.
 import { Station } from '../canonicalization/types';
 
 export interface FixtureEvent {
