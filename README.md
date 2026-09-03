@@ -62,19 +62,30 @@ không lặp lại ở đây.
   API, có fault injection: HTTP 500 once/always, timeout), retry + backoff
   trong `CollectionRunsService`, và secret handling (API key chỉ nằm trong
   env, không bao giờ ghi vào DB/log).
-- **Chưa làm**: collector Production Database (Step 7 — register/verify/
-  discover/select/collect + secret handling riêng), Supplier Crawler
-  (Step 8 — pagination loop protection), `ManagementEventsModule` ghi thật
-  (POST block/resume/ack/note), và UI — đều là bước tiếp theo sau Step 6.
+- Step 7 (code xong, **CHƯA verify Docker thật** — xem entry Step 7 bên
+  dưới): collector "Production Database" thật — service Postgres riêng
+  (`production-db/`, tách biệt hoàn toàn với `postgres` — nguồn dữ liệu
+  ngoài thật sự, không phải schema phụ trong cùng DB), full register→
+  verify→discover→select→collect qua `SourcesController`/
+  `CollectionRunsService`, secret handling cùng pattern Step 6.
+- **Chưa làm**: Supplier Crawler (Step 8 — pagination loop protection),
+  `ManagementEventsModule` ghi thật (POST block/resume/ack/note), và UI —
+  đều là bước tiếp theo sau Step 7.
 
 Backend là modular monolith NestJS, 5 module nghiệp vụ:
 
-- `SourcesModule` — `POST /sources`, `GET /sources/:id` (Step 6); config
-  JSON không bao giờ chứa secret literal, sanitize thêm 1 lớp phòng thủ ở
-  response (xem `sanitize-config.ts`)
+- `SourcesModule` — `POST /sources`, `GET /sources/:id` (Step 6); `POST
+  /sources/:id/verify`, `GET /sources/:id/discover`, `POST
+  /sources/:id/select` (Step 7, DATABASE source only); config JSON không
+  bao giờ chứa secret literal, sanitize thêm 1 lớp phòng thủ ở response
+  (xem `sanitize-config.ts`)
 - `CollectionRunsModule` — `POST /collection-runs`, `GET
-  /collection-runs/:id` (Step 6); gọi fixture-api thật, có retry/backoff,
-  reuse nguyên `CanonicalizationService.ingestBatch` để insert + recompute
+  /collection-runs/:id` (Step 6); reuse nguyên
+  `CanonicalizationService.ingestBatch` để insert + recompute. Dispatch
+  theo `source.type`: `API` → gọi fixture-api thật, có retry/backoff (Step
+  6); `DATABASE` → query bảng đã chọn trên `production-db` thật, không
+  retry (Step 7, đúng phạm vi đề bài — "Retry of transient failures" chỉ
+  yêu cầu cho Application API)
 - `CanonicalizationModule` — có pipeline Rule 1–5b + wiring Prisma thật
 - `ProductionDomainModule` — có logic Rule 6–7 + wiring Prisma thật
 - `ManagementEventsModule` — rỗng, chưa ghi được (chỉ đọc management_events
@@ -834,6 +845,162 @@ secret-endpoint `test.each` + 1 secret-log + 1 B006 end-to-end) + 1 case
   Không ảnh hưởng tính đúng đắn của lần verify (mỗi lần vẫn tạo Source mới,
   độc lập), chỉ là rác tích luỹ trong DB dev theo thời gian — chưa dọn.
 
+### Step 7 — 2026-09-03
+
+**Trạng thái: code xong, verify OFFLINE pass — CHƯA verify Docker thật
+(máy này không có Docker chạy được), chờ máy có Docker.**
+
+**Kiểm tra kiến trúc bắt buộc trước khi code (theo yêu cầu của prompt Step
+7) — kết quả:**
+- `docs/plan-v4.md`: grep toàn file cho "production database"/"mysql" chỉ
+  ra đúng 1 chỗ — Rule 4 (dòng 30), nhắc "Production Database" thuần tuý
+  như TÊN 1 nguồn Tier 1 trong logic conflict-resolution, không hề nói gì
+  về hạ tầng (service riêng hay schema phụ trong DB hiện có).
+- `docker-compose.yml` (trước khi sửa): đúng 4 service — `postgres`
+  (canonical data của chính backend), `backend`, `fixture-api`, `frontend`.
+  Không service nào đóng vai trò "production database" — xác nhận nghi
+  ngờ ban đầu là đúng.
+- Không có `plan-v3.md` nào trong repo để đối chiếu thêm (plan-v4.md chỉ
+  nhắc tên file đó, chưa từng được commit).
+- Phát hiện thêm lúc kiểm: `docs/HANDOFF.md` (file tồn tại nhưng **chưa
+  từng được `git add`** — thấy qua `git status`, giống đúng cạm bẫy #11 đã
+  ghi lại trong chính file đó) và
+  `docs/Celesnity Technical Take-Home Assessment — 2026 (1).pdf` (**đề bài
+  gốc**, cũng chưa `git add`) — đọc trực tiếp PDF này để lấy đúng bảng
+  mapping station→source thay vì tin theo paraphrase trong prompt: xác
+  nhận đúng 100% — SORTING/WASHING/DRYING/FOLDING → Production database;
+  RECEIVING → Supplier crawler (Step 8, không phải Production Database);
+  DISPATCH → Application API hoặc production database. PDF cũng xác nhận
+  "Retry of transient failures" chỉ được yêu cầu cho Application API (mục
+  1), không có cho Database Connection (mục 3) — dùng làm căn cứ cho quyết
+  định KHÔNG thêm retry loop ở DB collector bên dưới.
+- **Đây là quyết định kiến trúc chưa có sẵn** → đã dừng lại, dùng
+  `AskUserQuestion` hỏi trước khi code, theo đúng yêu cầu của prompt.
+  Người dùng chọn: **service Postgres riêng trong `docker-compose.yml`**
+  (không phải schema phụ trong `postgres` hiện có, không phải MySQL) — lý
+  do đã trình bày: trung thực nhất với "a locally hosted PostgreSQL or
+  MySQL database provided through Docker Compose", mirror đúng pattern
+  `fixture-api/` đã dùng ở Step 6, tái dùng được driver `pg` đã có sẵn
+  trong repo (không cần dependency mới).
+
+**Đã làm:**
+- `production-db/` (top-level, ngang hàng `backend/`/`fixture-api/`/
+  `frontend/`) — chỉ 1 file `init.sql`, KHÔNG có Dockerfile riêng (dùng
+  thẳng image `postgres:16-alpine` chính thức qua
+  `/docker-entrypoint-initdb.d/`, mount read-only trong `docker-compose.yml`
+  — đơn giản hơn cả `fixture-api/`, không cần build gì).
+  - `station_readings`: bảng "production table" thật, cột `id, batch_id,
+    station, quantity, event_time`, seed data cho `SORTING/WASHING/DRYING/
+    FOLDING` (đúng bảng mapping đề bài gốc, xem trên) trên 2 batch riêng
+    (`PDB-B001`, `PDB-B002` — namespace riêng, cố tình khác `B001–B008` của
+    `batch-scenarios.ts` vì đây là 2 hệ fixture độc lập).
+  - `machines`, `employees`: bảng decoy, không liên quan collection — để
+    "discover tables" + "select ĐÚNG 1 bảng" có ý nghĩa thật (có nhiều hơn
+    1 bảng để chọn), không phải chọn giữa 1 lựa chọn duy nhất.
+  - `docker-compose.yml`: service `production-db` (port host 5434), volume
+    riêng `production_db_data`, healthcheck `pg_isready`; `backend` thêm
+    `PRODUCTION_DB_PASSWORD`, `depends_on` `production-db` healthy.
+- `backend/prisma/schema.prisma`: thêm cột `Source.verifiedAt` (nullable
+  `DateTime`) — verify THÀNH CÔNG mới cập nhật cột này; verify THẤT BẠI cố
+  tình không đụng vào (không có "trạng thái lỗi" riêng, chỉ có "lần verify
+  thành công gần nhất" hoặc null).
+- `database-source-client.ts` (mới, `collection-runs/`, mirror
+  `fixture-api-client.ts`): `verifyConnection`/`discoverSchema`/
+  `collectFromTable` dùng thẳng driver `pg` (KHÔNG dùng Prisma — Prisma
+  Client bị khoá schema tại thời điểm `generate`, không introspect runtime
+  được, mà "Discover available tables and columns" theo đúng câu chữ đề
+  bài đòi hỏi introspect thật qua `information_schema`). `collectFromTable`
+  validate `tableName` bằng regex identifier
+  (`/^[a-zA-Z_][a-zA-Z0-9_]*$/`) trước khi nhét vào SQL — phòng thủ SQL
+  injection dù về lý thuyết giá trị này luôn đến từ `selectTable()` (đã tự
+  validate lại qua 1 lần `discoverSchema()` thật trước khi lưu, không tin
+  thẳng input client).
+- `SourcesService`: thêm `verifyConnection`/`discoverSchema`/`selectTable`
+  (chỉ áp dụng source type `DATABASE`, ném `BadRequestException` nếu gọi
+  nhầm type khác). `selectTable` re-verify `table` có thật trong kết quả
+  `discoverSchema()` mới nhất trước khi lưu vào `config.selectedTable` —
+  không tin thẳng tên bảng client gửi lên.
+- `SourcesController`: thêm `POST /sources/:id/verify`, `GET
+  /sources/:id/discover`, `POST /sources/:id/select`.
+- `CollectionRunsService.runCollection()`: tách logic cũ (Step 6) ra
+  `runApiCollection` (nguyên si, không đổi 1 dòng logic), thêm
+  `runDatabaseCollection` cho source type `DATABASE` — query bảng đã chọn,
+  map row → `NewSourceRecordInput[]`, gọi thẳng
+  `CanonicalizationService.ingestBatch()` (Step 5, nguyên si, không viết
+  lại). **Không có retry loop** cho nhánh DATABASE (khác Step 6's API
+  collector) — đúng phạm vi đề bài gốc (xem mục kiểm tra kiến trúc ở trên).
+- `backend/test/database-collector.e2e-spec.ts` (Step 7, DB thật — CẦN
+  CẢ 2 Postgres, `postgres` lẫn `production-db`, không tự host in-process
+  được như `fixture-api` vì đây là Postgres thật, không phải script JS):
+  `test.each` verify connection (đúng credential → thành công +
+  `verifiedAt` cập nhật; sai password → thất bại + `verifiedAt` không đổi);
+  discover trả đúng ≥ 3 bảng thật kèm cột đúng; select + collect →
+  `canonical_events`/`source_records` đúng qua `ingestBatch()` thật (assert
+  `PDB-B001:WASHING` = 98, `ACCEPTED`); collect khi chưa select → throw,
+  không crash app (`GET /health` vẫn 200 sau đó); secret regression
+  `test.each` 3 endpoint + 1 log check (cùng pattern Step 6, cố tình đưa
+  literal password vào `config` để test lớp redact có tác dụng thật).
+
+**Vấn đề gặp phải:**
+- **Bug tự phát hiện lúc review lại code trước khi coi là xong** (chưa
+  chạy `test:e2e` thật để Jest tự bắt — thấy bằng cách tự hỏi "tsc có thật
+  sự đang kiểm tra đoạn này không" sau khi thấy `tsc --noEmit` sạch một
+  cách đáng ngờ cho 1 đoạn code có vẻ sai kiểu): `runDatabaseCollection`
+  khai báo `let rows;` KHÔNG type annotation — vì `noImplicitAny: false`
+  trong `tsconfig.json`, biến này bị suy ra ngầm thành `any`, kéo theo cả
+  chuỗi `.filter().map()` sau đó cũng thành `any`, khiến TypeScript hoàn
+  toàn không kiểm tra được việc gán `row.station` (kiểu `string` từ DB)
+  vào field `station: Station` (union literal) của `NewSourceRecordInput`
+  — lẽ ra phải là lỗi biên dịch thật. Xác nhận bằng cách viết lại y hệt
+  đoạn code trong 1 file `.ts` cô lập bên ngoài project (không có
+  `noImplicitAny: false`) → lỗi hiện ra đúng như kỳ vọng; rồi dùng thẳng
+  TypeScript Compiler API (`ts.createProgram` + `getTypeAtLocation`) để in
+  ra kiểu THẬT mà compiler suy luận cho biến `records` ngay trong chính
+  file thật của repo → thấy rõ `any` thay vì kiểu object mong đợi, xác
+  nhận đúng nguyên nhân trước khi sửa. Sửa bằng cách thêm annotation tường
+  minh `let rows: ProductionTableRow[];`, và thêm `as Station` có chú
+  thích rõ lý do an toàn (đã lọc qua `isStationValue` ở bước `.filter()`
+  ngay trước đó — TypeScript không tự carry được narrowing qua 1 arrow
+  function bọc ngoài type guard, đây là giới hạn biết trước của ngôn ngữ,
+  không phải chỗ nào cũng tự suy luận được). Bài học: khi thấy `tsc --noEmit`
+  sạch cho 1 đoạn code có `let x;` không type annotation, luôn nghi ngờ và
+  kiểm tra kiểu suy ra thật, đừng chỉ tin "0 lỗi" là code đã type-safe thật
+  sự — `noImplicitAny: false` (đã bật từ Step 1, xem lý do gốc trong
+  README) có thể che giấu đúng loại bug này.
+- Không verify được cú pháp SQL thật của `production-db/init.sql` qua
+  `psql`/Postgres thật — máy này không có `psql` cài sẵn và không có
+  Docker. Chỉ review bằng mắt (cú pháp SQL chuẩn, đơn giản: `CREATE TABLE`/
+  `INSERT` cơ bản, không dùng tính năng Postgres nào đặc biệt) — **CHƯA
+  verify chạy thật**, nằm trong Phần B.
+
+**Quyết định phát sinh:**
+- `Source.config` cho DATABASE source theo đúng pattern Step 6: chỉ lưu
+  **tên** biến môi trường chứa password (`passwordEnvVar`), không lưu
+  password thật. Khác Step 6 ở chỗ `host`/`port`/`database`/`user` (không
+  phải secret) được cung cấp trực tiếp trong `config` lúc `POST /sources`
+  — không cần biến môi trường tĩnh riêng cho từng phần này (khác
+  `FIXTURE_API_BASE_URL` cố định của Step 6), vì mỗi Source DATABASE có
+  thể trỏ tới 1 DB khác nhau, không có "1 địa chỉ cố định" như fixture-api.
+- Không thêm retry/backoff cho `runDatabaseCollection` — đề bài gốc (đã
+  đọc trực tiếp PDF, xem mục kiểm tra kiến trúc) chỉ yêu cầu "Retry of
+  transient failures" cho Application API (mục 1), không nhắc gì tương tự
+  cho Database Connection (mục 3). Thêm retry ở đây sẽ là suy diễn vượt
+  phạm vi đề, không phải yêu cầu thật.
+- `selectTable()` gọi lại `discoverSchema()` thật (tốn thêm 1 round-trip
+  query) thay vì tin thẳng tên bảng client gửi lên — đánh đổi hiệu năng
+  nhỏ lấy đảm bảo: không bao giờ lưu 1 `selectedTable` không tồn tại, và
+  không bao giờ để tên bảng chưa qua introspect thật lọt vào
+  `collectFromTable`'s SQL.
+- `production-db/init.sql` seed 2 bảng decoy (`machines`, `employees`)
+  không phục vụ collection gì — cố ý, để bước "discover" + "select" có ý
+  nghĩa thật (nhiều hơn 1 lựa chọn), không phải hình thức vì DB chỉ có
+  đúng 1 bảng.
+- Batch id trong `production-db/init.sql` (`PDB-B001`, `PDB-B002`) cố tình
+  KHÔNG trùng với `B001–B008` của `batch-scenarios.ts` — 2 hệ fixture độc
+  lập (1 cái là DB ngoài thật để Step 7 collector query, 1 cái insert
+  thẳng qua Prisma để test canonicalization Step 3–6), không có lý do gì
+  phải dùng chung batch id.
+
 ## Việc cần làm ở máy có Docker
 
 Checklist thủ công — làm ở máy laptop có Docker chạy được, sau khi pull code
@@ -869,3 +1036,28 @@ mới nhất:
       trong entry "Step 6 — HOÀN TẤT, verify thật trên Postgres thật" bên
       trên. Sau đó `npm run verify:step6` chạy PASS thật (22/22 test:e2e),
       bằng chứng retry thật đã dán trong entry đó — không lặp lại ở đây.
+- [ ] **Step 7 — chưa verify, làm sau khi các mục trên xong**:
+      - `cd backend && npx prisma migrate dev` — schema có thêm cột
+        `sources.verified_at` (Step 7); nhớ bài học cạm bẫy #11 trong
+        `docs/HANDOFF.md` — `git status` NGAY sau khi migration mới được
+        tạo, đừng để lặp lại vụ migration history bị mất của Step 6.
+      - `docker compose up -d --build` — verify cả **4** service `backend`,
+        `postgres`, `fixture-api`, `production-db` lên `healthy`, dán log
+        thật (`production-db` health check là `pg_isready`, seed
+        `production-db/init.sql` chạy tự động lúc container khởi tạo lần
+        đầu — nếu volume `production_db_data` đã tồn tại từ trước, init.sql
+        KHÔNG tự chạy lại, cần `docker compose down -v` rồi `up` lại nếu
+        cần seed lại từ đầu).
+      - `cd backend && npm run test:e2e` — phải thấy
+        `database-collector.e2e-spec.ts` pass đủ: 2 case verify connection
+        (`test.each`), 1 case discover, 1 case select+collect, 1 case
+        collect-không-select, 4 case secret regression (3 endpoint
+        `test.each` + 1 log) — liệt kê từng case trong output, không tóm
+        tắt bằng số lượng.
+      - Chưa có `scripts/verify-step7.sh` riêng (ngoài phạm vi bắt buộc của
+        prompt Step 7 — xem entry Step 7 phía trên) — có thể viết sau, theo
+        đúng pattern `scripts/verify-step6.sh` nếu thấy cần lặp lại verify
+        nhiều lần.
+      - Sau khi có log thật ở trên: sửa lại đúng entry "Step 7" phía trên
+        (đổi trạng thái từ "CHƯA verify Docker thật" thành kết quả thật +
+        dán log), rồi mới đề xuất commit message thứ 2 cho phần verify.

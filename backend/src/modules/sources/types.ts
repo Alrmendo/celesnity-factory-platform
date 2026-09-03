@@ -11,6 +11,12 @@ export interface SourceResponse {
   name: string;
   type: SourceType;
   config: unknown;
+  verifiedAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
+}
+
+// Step 7: POST /sources/:id/select body.
+export interface SelectTableDto {
+  table: string;
 }

@@ -41,12 +41,22 @@ services:
       # env var's NAME, never the value; see collection-runs.service.ts).
       FIXTURE_API_BASE_URL: http://fixture-api:4000
       FIXTURE_API_KEY: ${FIXTURE_API_KEY:-fixture-secret-key}
+      # Step 7: real password for the "Production Database" collector.
+      # CollectionRunsService/SourcesService read it from this env var by
+      # name — Source.config only ever stores "PRODUCTION_DB_PASSWORD" (the
+      # NAME), never the value, same pattern as FIXTURE_API_KEY above. Host/
+      # port/database/user are NOT secret and are supplied directly in
+      # Source.config when a Source is registered (POST /sources), not via
+      # env — only the credential is indirected.
+      PRODUCTION_DB_PASSWORD: ${PRODUCTION_DB_PASSWORD:-prod-db-secret-password}
     ports:
       - "3001:3001"
     depends_on:
       postgres:
         condition: service_healthy
       fixture-api:
+        condition: service_healthy
+      production-db:
         condition: service_healthy
 
   # Step 6: mock "Application API" — see fixture-api/server.js.
@@ -76,6 +86,32 @@ services:
       timeout: 5s
       retries: 10
 
+  # Step 7: "Production Database" — a genuinely separate Postgres instance
+  # from `postgres` above (that one holds this app's own canonical data;
+  # this one stands in for the factory's own, external production-line
+  # database that the Step 7 collector registers/verifies/discovers/
+  # selects/collects from). Official postgres image, no custom Dockerfile —
+  # `production-db/init.sql` seeds it via Postgres's own
+  # /docker-entrypoint-initdb.d/ mechanism on first start.
+  production-db:
+    image: postgres:16-alpine
+    container_name: celesnity-production-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${PRODUCTION_DB_USER:-prod_reader}
+      POSTGRES_PASSWORD: ${PRODUCTION_DB_PASSWORD:-prod-db-secret-password}
+      POSTGRES_DB: ${PRODUCTION_DB_NAME:-production}
+    ports:
+      - "5434:5432"
+    volumes:
+      - production_db_data:/var/lib/postgresql/data
+      - ./production-db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PRODUCTION_DB_USER:-prod_reader} -d ${PRODUCTION_DB_NAME:-production}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   frontend:
     build:
       context: ./frontend
@@ -93,3 +129,4 @@ services:
 
 volumes:
   postgres_data:
+  production_db_data:
