@@ -15,6 +15,7 @@ import { ProductionDomainService } from '../src/modules/production-domain/produc
 import { PrismaModule } from '../src/prisma/prisma.module';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { buildBatchScenarios, T0 } from './fixtures/batch-scenarios';
+import { truncateAll } from './fixtures/db-utils';
 
 // A few minutes past the fixtures' latest eventTime (max is T0+10min, in
 // B003/B004) so every scenario except the event-less B001 reads OK, not
@@ -26,21 +27,6 @@ const NOW = new Date(T0.getTime() + 11 * 60_000);
 // the batch-state functions look at it. Used only when writing test data
 // directly via Prisma below.
 const TEST_ORGANIZATION_ID = 'org-test';
-
-async function truncateAll(prisma: PrismaService): Promise<void> {
-  await prisma.$executeRawUnsafe(`
-    TRUNCATE TABLE
-      canonical_event_sources,
-      canonical_events,
-      source_records,
-      collection_runs,
-      sources,
-      management_events,
-      batches,
-      work_orders
-    RESTART IDENTITY CASCADE
-  `);
-}
 
 async function createSingleSourceContext(
   prisma: PrismaService,

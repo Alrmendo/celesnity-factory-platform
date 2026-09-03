@@ -1,0 +1,10 @@
+{
+  "name": "fixture-api",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Mock \"Application API\" fixture service (Step 6) — fixed DISPATCH events per docs/plan-v4.md's scenario table, with configurable fault injection (HTTP 500 / timeout) for collector retry testing.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  }
+}

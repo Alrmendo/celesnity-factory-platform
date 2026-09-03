@@ -86,15 +86,21 @@ model Source {
 }
 
 model CollectionRun {
-  id          String              @id @default(uuid()) @db.Uuid
-  sourceId    String              @map("source_id") @db.Uuid
-  source      Source              @relation(fields: [sourceId], references: [id])
-  startedAt   DateTime            @map("started_at")
-  finishedAt  DateTime?           @map("finished_at")
-  status      CollectionRunStatus
-  recordsRead Int                 @default(0) @map("records_read")
-  errorCount  Int                 @default(0) @map("error_count")
-  createdAt   DateTime            @default(now()) @map("created_at")
+  id           String              @id @default(uuid()) @db.Uuid
+  sourceId     String              @map("source_id") @db.Uuid
+  source       Source              @relation(fields: [sourceId], references: [id])
+  startedAt    DateTime            @map("started_at")
+  finishedAt   DateTime?           @map("finished_at")
+  status       CollectionRunStatus
+  recordsRead  Int                 @default(0) @map("records_read")
+  errorCount   Int                 @default(0) @map("error_count")
+  // Step 6 addition: sanitized (never contains the source's secret/API key
+  // — see CollectionRunsService) human-readable detail for a FAILED run.
+  // errorCount alone (a number) isn't "error info" per plan-v4.md §6; this
+  // is additive to the Step 2 schema, not a field the plan's changelog
+  // lists, so no existing constraint/behavior changes.
+  errorMessage String?             @map("error_message") @db.Text
+  createdAt    DateTime            @default(now()) @map("created_at")
 
   sourceRecords SourceRecord[]
 

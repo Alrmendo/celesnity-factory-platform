@@ -55,15 +55,26 @@ không lặp lại ở đây.
   Desktop đang tắt. Xem mục
   [Việc cần làm ở máy có Docker](#việc-cần-làm-ở-máy-có-docker) bên dưới,
   còn 1 việc chưa tick.
-- **Chưa làm**: collector thật (Application API/Production Database/
-  Supplier Crawler — nguồn dữ liệu thật cho `ingestAndRecompute`),
-  `ManagementEventsModule` ghi thật (POST block/resume/ack/note), và UI —
-  đều là bước tiếp theo sau Step 5.
+- Step 6 (code xong, **CHƯA verify Docker/integration/e2e thật** — xem entry
+  Step 6 bên dưới và mục
+  [Việc cần làm ở máy có Docker](#việc-cần-làm-ở-máy-có-docker)): collector
+  "Application API" thật (`SourcesModule`, `CollectionRunsModule`), service
+  fixture `fixture-api/` (mock Application API, có fault injection: HTTP 500
+  once/always, timeout), retry + backoff trong `CollectionRunsService`, và
+  secret handling (API key chỉ nằm trong env, không bao giờ ghi vào DB/log).
+- **Chưa làm**: collector Production Database (Step 7 — register/verify/
+  discover/select/collect + secret handling riêng), Supplier Crawler
+  (Step 8 — pagination loop protection), `ManagementEventsModule` ghi thật
+  (POST block/resume/ack/note), và UI — đều là bước tiếp theo sau Step 6.
 
 Backend là modular monolith NestJS, 5 module nghiệp vụ:
 
-- `SourcesModule` — rỗng, chưa có logic (collector thật, bước sau)
-- `CollectionRunsModule` — rỗng, chưa có logic (collector thật, bước sau)
+- `SourcesModule` — `POST /sources`, `GET /sources/:id` (Step 6); config
+  JSON không bao giờ chứa secret literal, sanitize thêm 1 lớp phòng thủ ở
+  response (xem `sanitize-config.ts`)
+- `CollectionRunsModule` — `POST /collection-runs`, `GET
+  /collection-runs/:id` (Step 6); gọi fixture-api thật, có retry/backoff,
+  reuse nguyên `CanonicalizationService.ingestBatch` để insert + recompute
 - `CanonicalizationModule` — có pipeline Rule 1–5b + wiring Prisma thật
 - `ProductionDomainModule` — có logic Rule 6–7 + wiring Prisma thật
 - `ManagementEventsModule` — rỗng, chưa ghi được (chỉ đọc management_events
@@ -429,6 +440,192 @@ task này).
   chạy trong container, task không nhắc tới file này nhưng thiếu nó thì
   container backend sẽ crash ngay khi `PrismaModule` gọi `$connect()`.
 
+### Step 6 — 2026-09-03
+
+**Trạng thái: code xong, verify OFFLINE pass — CHƯA verify Docker/
+integration/e2e thật (máy này không có Docker chạy được), chờ máy có
+Docker.**
+
+**Đã làm:**
+- `fixture-api/` (top-level, ngang hàng `backend/`/`frontend/`) — mock
+  "Application API" theo đề bài. Plain Node `http`, **zero dependency**
+  (không `npm install`, không framework) — cố ý, để: (1) Dockerize không cần
+  layer cài dependency, (2) `require`-able thẳng từ backend e2e test để chạy
+  in-process, không cần container thật, miễn máy có Postgres.
+  - `GET /events`: yêu cầu header `x-api-key` khớp secret (constructor
+    option → env `FIXTURE_API_KEY` → default dev). Trả cố định 2 record
+    DISPATCH khớp đúng `docs/plan-v4.md` §3 (B006 quantity 480, B008 quantity
+    97 — cùng `eventTime` với record Production DB tương ứng trong
+    `batch-scenarios.ts`, để B006 là CONFLICT thật theo Rule 5.4). Theo đúng
+    phạm vi thiết kế ở Rule 4 (comment trong file): B001–B005B/B007 không có
+    data vì Application API trong scope này chỉ cấp DISPATCH.
+  - Fault injection: query param `fault` (hoặc env `FIXTURE_FAULT_MODE` làm
+    default) — `none` | `500-once` | `500-always` | `timeout`. `500-once`
+    dùng header `x-attempt` (client tự tăng mỗi lần retry) để biết đây là
+    lần gọi thứ mấy — fixture-api không giữ state phía server, hoàn toàn
+    stateless/deterministic.
+  - `docker-compose.yml`: thêm service `fixture-api` (port host 4100),
+    `backend` thêm `FIXTURE_API_BASE_URL`/`FIXTURE_API_KEY`, `depends_on`
+    `fixture-api` healthy.
+- `backend/prisma/schema.prisma`: thêm cột `CollectionRun.errorMessage`
+  (nullable, `@db.Text`) — `errorCount` (Int, có sẵn từ Step 2) không phải
+  "thông tin lỗi" theo nghĩa mục 3 của yêu cầu Step 6, cần thêm cột text.
+  Addition thuần, không đổi field nào đã có. `npx prisma format`/`validate`/
+  `generate` chạy sạch offline.
+- `CollectionRunsService.runCollection(sourceId)`
+  (`backend/src/modules/collection-runs/`): đọc `Source.config` (shape
+  `FixtureApiSourceConfig` trong `types.ts`: `{ baseUrl, apiKeyEnvVar,
+  fault? }` — **không bao giờ có secret literal**, chỉ có tên env var trỏ
+  tới secret thật), resolve API key thật qua `ConfigService.get(apiKeyEnvVar)`
+  lúc gọi (chưa từng ghi xuống DB). Ghi đúng 1 row `collection_runs`
+  (RUNNING → SUCCESS|FAILED). Retry 3 lần, backoff `50ms * 2^n`, timeout
+  2s/request (AbortController) qua `fetchFixtureEvents`
+  (`fixture-api-client.ts`) — lỗi 401 không retry (`retryable: false`,
+  không tự sửa được bằng cách gọi lại), lỗi 5xx/timeout/network thì retry.
+  Khi SUCCESS, map fixture event → `NewSourceRecordInput[]`, gọi thẳng
+  `CanonicalizationService.ingestBatch()` (Step 5, nguyên si) — **không viết
+  lại** logic canonicalization ở đây.
+- `SourcesModule`/`CollectionRunsModule`: implement `POST /sources`, `GET
+  /sources/:id`, `POST /collection-runs`, `GET /collection-runs/:id` (đều
+  rỗng từ Step 1). `sanitize-config.ts` (sources) redact theo tên field
+  (`/key|secret|token|password|credential/i`, trừ field kết thúc bằng
+  `envVar` — đó là TÊN biến môi trường, không phải secret) — lớp phòng thủ
+  thêm, vì bất biến kiến trúc chính đã đảm bảo config không bao giờ chứa
+  secret thật (xem trên).
+- `CanonicalizationModule` thêm `exports: [CanonicalizationService]` (thiếu
+  từ Step 3, không ai cần import xuyên module cho tới giờ) — bắt buộc để
+  `CollectionRunsModule` inject được qua Nest DI thật (không chỉ qua
+  `moduleRef.get()` trong test).
+- `backend/test/collection-runs.e2e-spec.ts` (Step 6, DB thật + fixture-api
+  in-process): `test.each` 2 case fault injection (500-once → SUCCESS sau
+  retry, 500-always → FAILED + `errorMessage` + app vẫn `GET /health` được
+  bình thường); secret regression `test.each` 3 endpoint (`POST /sources`,
+  `GET /sources/:id`, `GET /collection-runs/:id`) + 1 test riêng cho
+  application log (spy `process.stdout`/`stderr.write` trong lúc chạy 1
+  collection run thật, assert secret không xuất hiện); B006 end-to-end qua
+  collector thật (Production DB insert trực tiếp như Step 5 vẫn làm vì
+  chưa có DB collector thật — Step 7, + Application API qua
+  `CollectionRunsService.runCollection()` thật sự gọi HTTP tới fixture-api)
+  → assert `canonical_events` status = CONFLICT thật, `qualityIndicators`
+  có `DISPATCH_CONFLICT` chưa acknowledged, batch không COMPLETED.
+- Phát hiện khi viết test trên: file e2e thứ 2 cùng truncate/dùng chung
+  batchId `B006` như `batch-lifecycle.e2e-spec.ts` — nếu Jest chạy 2 file
+  song song (mặc định) trên CÙNG Postgres, có race condition thật (1 file
+  TRUNCATE giữa lúc file kia đang insert). Sửa bằng cách thêm
+  `"maxWorkers": 1` vào `test/jest-e2e.json` (ép các file e2e chạy tuần tự)
+  — cần thiết ngay khi có ≥ 2 file e2e chạm DB thật, không phải riêng Step 6.
+  Nhân tiện tách `truncateAll` (trước đó định nghĩa riêng trong
+  `batch-lifecycle.e2e-spec.ts`) ra `test/fixtures/db-utils.ts` dùng chung
+  cho cả 2 file, tránh 2 danh sách bảng lệch nhau theo thời gian.
+- Verify OFFLINE (không cần Docker/Postgres — chỉ cần Node, không đụng
+  container nào):
+  - `npx tsc --noEmit` sạch toàn repo.
+  - `npx eslint "{src,apps,libs,test}/**/*.ts"` sạch toàn repo (chạy lại sau
+    `--fix`, không chỉ tin lần đầu — bài học từ Step 3).
+  - `npm run test`: vẫn 22/22 pass, không case nào mới (mọi test Step 6 đều
+    đụng DB thật nên nằm ở `test:e2e`, không phải `test`) — dán nguyên output:
+    ```
+    PASS src/modules/canonicalization/canonicalization.pipeline.spec.ts
+    PASS src/modules/production-domain/freshness.spec.ts
+    PASS src/modules/production-domain/batch-state.spec.ts
+    PASS src/app.controller.spec.ts
+
+    Test Suites: 4 passed, 4 total
+    Tests:       22 passed, 22 total
+    ```
+  - Smoke test thủ công KHÔNG đụng Postgres (script tạm, đã xoá sau khi
+    chạy): khởi `fixture-api` thật in-process (`createServer` từ
+    `fixture-api/server.js`), mock `PrismaService`/`CanonicalizationService`,
+    gọi thẳng `CollectionRunsService.runCollection()` qua HTTP thật tới
+    fixture-api. Xác nhận đúng 4 nhánh: `500-once` → 1 warning log rồi
+    SUCCESS (`errorCount=1`, `recordsRead=2`); `500-always` → 3 lần warning
+    rồi FAILED (`errorCount=3`, có `errorMessage`); không fault → SUCCESS
+    ngay; env var API key thiếu → throw đúng message (chỉ nêu TÊN biến, không
+    có giá trị). Đây KHÔNG thay thế `test:e2e` thật (không có Postgres/DI đầy
+    đủ qua Nest), chỉ xác nhận logic HTTP+retry+mapping tự viết không có bug
+    rõ ràng trước khi chờ máy có Docker.
+  - `fixture-api/server.js` tự chạy standalone (`node -e` gọi trực tiếp
+    `createServer`) qua `fetch` thật: xác nhận thiếu key/sai key → 401, đúng
+    key không fault → 200 + đúng 2 event, `500-once` đúng thứ tự 500 rồi
+    200, `500-always` luôn 500, `/health` → 200.
+
+**Vấn đề gặp phải:**
+- `Record<string, unknown>` (kiểu `CreateSourceDto.config`) không tự gán
+  được vào Prisma `InputJsonValue` (Prisma yêu cầu kiểu JSON đệ quy cụ thể,
+  `unknown` không chứng minh được là JSON hợp lệ dù runtime luôn đúng) — ép
+  kiểu tường minh `as Prisma.InputJsonValue` ở `sources.service.ts` và
+  trong test. Không xảy ra ở `canonicalization.service.ts` (Step 5) vì chỗ
+  đó dùng object literal cụ thể (`{ quantity }`), TypeScript suy luận kiểu
+  hẹp hơn nên tự khớp được.
+- `emitDecoratorMetadata` + `isolatedModules` (đã bật từ Step 1) đòi type
+  dùng trong signature có decorator (`@Body() dto: CreateSourceDto`) phải
+  import bằng `import type` nếu type đó đến từ file khác — sửa
+  `sources.controller.ts` dùng `import type { CreateSourceDto }`.
+  `RunCollectionDto` ở `collection-runs.controller.ts` không bị lỗi này vì
+  là class định nghĩa ngay trong file (có runtime representation thật).
+- `fixture-api/server.js` là JS thuần, không nằm trong TypeScript project
+  của `backend/` — import nó vào `collection-runs.e2e-spec.ts` bằng `import`
+  ESM dưới `"module": "nodenext"` sẽ vướng luật resolution nghiêm ngặt
+  (bắt buộc extension tường minh, coi file là ESM/CJS theo `package.json`
+  "type" của thư mục đó). Dùng thẳng `require()` (kiểu trả về `any` từ
+  `@types/node`) thay vì `import` — né hoàn toàn việc tsc phải resolve
+  `fixture-api/` như 1 phần của chương trình TS.
+- Bug tự phát hiện lúc review lại test (chưa chạy được `test:e2e` thật để
+  Jest tự bắt ra — thấy được thuần bằng đọc lại code): bản đầu của
+  `collection-runs.e2e-spec.ts`, nhóm test "secret regression" tạo 1 API key
+  RIÊNG rồi gán `process.env.FIXTURE_API_KEY = <key riêng đó>` trong
+  `beforeEach`, nhưng KHÔNG restore lại sau đó. Vì instance `fixture-api`
+  dùng chung cho cả file được khởi tạo 1 lần ở `beforeAll` với 1 key CỐ ĐỊNH
+  (`RUN_TEST_API_KEY`), và `process.env` là state toàn cục theo process, key
+  bị đổi này sẽ "rò" sang test B006 chạy SAU nó trong cùng file — B006 lúc
+  đó sẽ gọi fixture-api với sai key thật (401), làm collection run FAILED
+  thay vì SUCCESS như test mong đợi, dù logic collector hoàn toàn đúng. Sửa
+  bằng cách bỏ hẳn key riêng, dùng lại `RUN_TEST_API_KEY` (key thật của
+  fixture-api instance) cho cả nhóm test "secret regression" — vừa hết bug
+  (không còn mutate `process.env` nữa), vừa để test này chạy hết đường happy
+  path thật (500-once → retry → SUCCESS) thay vì fail sớm ở 401 như bản đầu.
+
+**Quyết định phát sinh:**
+- Retry KHÔNG lặp lại khi fixture-api trả 401 (`FixtureApiError.retryable =
+  false`) — sai key/thiếu key không tự khỏi bằng cách gọi lại, retry chỉ có
+  ý nghĩa với lỗi tạm thời (5xx, timeout, lỗi mạng). Đây là quyết định thiết
+  kế riêng của phần collector, không phải điều `docs/plan-v4.md` yêu cầu cụ
+  thể (plan chỉ nói "có retry", không nói retry mọi loại lỗi).
+- `errorCount` trên 1 run SUCCESS (sau khi có ít nhất 1 lần fail trước đó)
+  ghi lại **số lần fail trước khi thành công** (vd `500-once` → `errorCount
+  = 1`), không phải 0 — tận dụng cột có sẵn để giữ thông tin "có trục trặc
+  nhưng cuối cùng vẫn OK", thay vì chỉ 0/thành-công hoặc số-lần-fail/thất-bại.
+- fixture-api's fault injection dùng header `x-attempt` do CLIENT tự set và
+  tăng dần qua mỗi lần retry (không phải state phía server) — chọn cách này
+  để fixture-api hoàn toàn stateless/deterministic, không có state ẩn giữa
+  các request có thể gây flaky test khi nhiều test chạy liên tiếp trên cùng
+  1 fixture-api instance (test Step 6 dùng chung 1 instance suốt cả file,
+  không khởi tạo lại instance mỗi test case).
+- `Source.config` cho fixture-api-backed source chỉ lưu **tên** biến môi
+  trường chứa secret (`apiKeyEnvVar`), không lưu chính secret — đây là bất
+  biến kiến trúc chính đảm bảo mục 4/5 của yêu cầu Step 6 (secret không lộ
+  qua `POST /sources`/`GET /sources/:id`), không phải chỉ dựa vào lớp
+  sanitize ở response. `sanitize-config.ts` là phòng thủ thêm (phòng
+  trường hợp ai đó lỡ đưa secret thật vào `config` — test secret regression
+  cố tình mô phỏng đúng tình huống sai này để chứng minh lớp phòng thủ có
+  tác dụng thật, không chỉ đúng vì "chọn không lưu secret" nên trivially
+  pass).
+- Không thêm `class-validator`/`class-transformer` cho DTO (`CreateSourceDto`,
+  `RunCollectionDto` chỉ là interface/class thường, không có runtime
+  validation) — nhất quán với toàn bộ codebase hiện tại (chưa module nào
+  dùng validation pipe), tránh thêm dependency mới ngoài phạm vi Step 6.
+
+### Step 6 verify script — 2026-09-03
+
+Thêm `scripts/verify-step6.sh` (`chmod +x`, `bash -n` sạch) gộp cả 3 việc
+verify Docker của Step 6 (checklist bên dưới) thành 1 lệnh:
+`npm run verify:step6` (từ `backend/`) hoặc `bash scripts/verify-step6.sh`
+(từ gốc repo) — ghi toàn bộ bằng chứng thật vào
+`step6-verification-<timestamp>.log` ở gốc repo, không chỉ tóm tắt
+pass/fail. Không tự chạy được ở máy này (không có Docker) — chỉ viết +
+`bash -n` + review theo route/type thật trong code, xem chi tiết trong
+comment đầu file script.
+
 ## Việc cần làm ở máy có Docker
 
 Checklist thủ công — làm ở máy laptop có Docker chạy được, sau khi pull code
@@ -457,3 +654,27 @@ mới nhất:
       nên tự pass). Sau đó thử `npm run seed` 1 lần, xác nhận không lỗi.
       Nếu `test:e2e` fail vì lý do khác ngoài "không tới được DB", đó là
       vấn đề thật cần sửa, không phải môi trường.
+- [ ] **Step 6 — chưa verify, làm sau khi mục trên xong**:
+      - `cd backend && npx prisma migrate dev` — schema có thêm cột
+        `collection_runs.error_message` (Step 6) so với lần migrate trước;
+        cần migration mới (đặt tên vd `add_collection_run_error_message`)
+        thay vì tạo lại `init_schema` nếu DB cũ đã có sẵn 9 bảng.
+      - `docker compose up --build` — start 3 service `backend`, `postgres`,
+        `fixture-api` (chạy tay bước này, KHÔNG nằm trong script bên dưới —
+        xem lý do trong comment đầu file script).
+      - **`npm run verify:step6`** (chạy từ `backend/`, hoặc `bash
+        scripts/verify-step6.sh` từ gốc repo) — 1 lệnh gộp cả 3 việc: (1)
+        `docker compose ps` (verify healthy cả 3 service), (2) `npm run
+        test:e2e` đầy đủ (phải thấy `collection-runs.e2e-spec.ts` pass đủ: 2
+        case fault injection `test.each`, 4 case secret regression [3
+        endpoint `test.each` + 1 log check], 1 case B006 end-to-end qua
+        collector thật), (3) 1 lần gọi thật `POST /collection-runs` với
+        `fault: "500-once"` + tail log container `backend` cùng lúc (bắt
+        bằng chứng retry thật). Ghi TOÀN BỘ output thật (không tóm tắt số
+        lượng) vào `step6-verification-<timestamp>.log` ở gốc repo, kết
+        luận PASS/FAILED dựa theo exit code thật của `test:e2e` (không phải
+        theo 2 việc còn lại). Dán nguyên nội dung file log này vào đây.
+      - Sau khi có log thật ở trên: sửa lại đúng entry "Step 6" phía trên
+        (đổi trạng thái từ "CHƯA verify Docker/integration/e2e thật" thành
+        kết quả thật + dán log), rồi mới đề xuất commit message thứ 2 cho
+        phần verify.
