@@ -33,6 +33,16 @@ riêng), port 3001 (Backend API) và 3000 (Frontend) tự forward, mặc định
 `private`. `docker-compose.yml` không phụ thuộc devcontainer nên vẫn chạy độc
 lập bằng `docker compose up` như trên máy local bình thường.
 
+## Assessment Assumptions
+
+- Hạ tầng "Production Database" (Step 7, nguồn DATABASE trong Rule 4) là
+  **service Postgres riêng trong `docker-compose.yml`** (`production-db`,
+  port host 5434) — không phải MySQL. Đề bài gốc chỉ nói "a locally hosted
+  PostgreSQL or MySQL database provided through Docker Compose" mà không
+  chỉ định cụ thể công nghệ; đây là quyết định thiết kế tự đặt ra (đã dừng
+  lại hỏi người dùng xác nhận qua `AskUserQuestion` trước khi code — xem
+  entry "Step 7" trong Nhật ký triển khai bên dưới).
+
 ## Trạng thái hiện tại
 
 Đã xong Step 1–5 trong kế hoạch (code). Kiến trúc đầy đủ, data model, và
@@ -62,12 +72,15 @@ không lặp lại ở đây.
   API, có fault injection: HTTP 500 once/always, timeout), retry + backoff
   trong `CollectionRunsService`, và secret handling (API key chỉ nằm trong
   env, không bao giờ ghi vào DB/log).
-- Step 7 (code xong, **CHƯA verify Docker thật** — xem entry Step 7 bên
-  dưới): collector "Production Database" thật — service Postgres riêng
-  (`production-db/`, tách biệt hoàn toàn với `postgres` — nguồn dữ liệu
-  ngoài thật sự, không phải schema phụ trong cùng DB), full register→
-  verify→discover→select→collect qua `SourcesController`/
-  `CollectionRunsService`, secret handling cùng pattern Step 6.
+- Step 7 **HOÀN TẤT, đã verify THẬT trên Postgres thật (2 instance)** — xem
+  entry "Step 7 — HOÀN TẤT, verify thật trên Postgres thật" (entry cuối
+  cùng của chuỗi Step 7 bên dưới, có bằng chứng log thật): collector
+  "Production Database" thật — service Postgres riêng (`production-db/`,
+  tách biệt hoàn toàn với `postgres` — nguồn dữ liệu ngoài thật sự, không
+  phải schema phụ trong cùng DB), full register→verify→discover→select→
+  collect qua `SourcesController`/`CollectionRunsService`, DB collector
+  KHÔNG retry (đúng phạm vi đề bài gốc — "Retry of transient failures" chỉ
+  áp dụng cho Application API), secret handling cùng pattern Step 6.
 - **Chưa làm**: Supplier Crawler (Step 8 — pagination loop protection),
   `ManagementEventsModule` ghi thật (POST block/resume/ack/note), và UI —
   đều là bước tiếp theo sau Step 7.
@@ -847,8 +860,12 @@ secret-endpoint `test.each` + 1 secret-log + 1 B006 end-to-end) + 1 case
 
 ### Step 7 — 2026-09-03
 
-**Trạng thái: code xong, verify OFFLINE pass — CHƯA verify Docker thật
-(máy này không có Docker chạy được), chờ máy có Docker.**
+**Trạng thái: HOÀN TẤT — đã verify THẬT trên Postgres thật (2 instance).**
+(Lúc viết entry này, dòng trạng thái ghi "code xong, verify OFFLINE pass —
+CHƯA verify Docker thật (máy này không có Docker chạy được), chờ máy có
+Docker" — đã lỗi thời từ khi đó; xem entry **"Step 7 — HOÀN TẤT, verify
+thật trên Postgres thật"** ở cuối chuỗi entry Step 7 bên dưới để xem toàn
+bộ quá trình verify thật + bằng chứng log thật cuối cùng.)
 
 **Kiểm tra kiến trúc bắt buộc trước khi code (theo yêu cầu của prompt Step
 7) — kết quả:**
@@ -1001,6 +1018,86 @@ secret-endpoint `test.each` + 1 secret-log + 1 B006 end-to-end) + 1 case
   thẳng qua Prisma để test canonicalization Step 3–6), không có lý do gì
   phải dùng chung batch id.
 
+### Step 7 — HOÀN TẤT, verify thật trên Postgres thật — 2026-09-03
+
+`npm run test:e2e` chạy PASS thật trên máy có Docker, cả 4 suite e2e của
+toàn repo — 31/31 test pass, gồm `database-collector.e2e-spec.ts` (Step 7)
+chạy trên **2 instance Postgres thật riêng biệt**: `postgres` (canonical
+data của chính backend) và `production-db` (mới, nguồn Database, mirror
+pattern `fixture-api` của Step 6). Toàn bộ luồng register→verify→discover→
+select→collect đã chạy thật, kèm secret regression cho nguồn DATABASE.
+Step 7 coi như xong và đã verify thật, không chỉ offline nữa.
+
+**Đã làm (tổng hợp lại đầy đủ, không chỉ trỏ ngược về entry cũ):**
+- Quyết định kiến trúc: service Postgres riêng `production-db` trong
+  `docker-compose.yml` (không phải schema phụ trong `postgres` hiện có,
+  không phải MySQL) — mirror đúng pattern `fixture-api/` đã dùng ở Step 6.
+- Seed sẵn `station_readings` (bảng "production table" thật, dữ liệu
+  SORTING/WASHING/DRYING/FOLDING đúng bảng mapping đề bài gốc) + 2 bảng
+  decoy (`machines`, `employees`) trong `production-db/init.sql`, để bước
+  "discover tables" + "select đúng 1 bảng" có ý nghĩa thật.
+- `database-source-client.ts` dùng lại thẳng driver `pg` (không dùng
+  Prisma — Prisma Client bị khoá schema tại thời điểm `generate`, không
+  introspect runtime được, mà "Discover available tables and columns" theo
+  đúng câu chữ đề bài đòi hỏi introspect thật qua `information_schema`).
+- Cột `Source.verifiedAt` mới (nullable `DateTime`) — chỉ verify thành
+  công mới cập nhật.
+- Luồng register→verify→discover→select→collect đầy đủ qua
+  `SourcesController` (`POST /sources/:id/verify`, `GET
+  /sources/:id/discover`, `POST /sources/:id/select`) và
+  `CollectionRunsService.runDatabaseCollection`.
+- DB collector **KHÔNG retry** — đúng phạm vi đề bài gốc (đã đọc trực tiếp
+  PDF: "Retry of transient failures" chỉ được yêu cầu cho Application API,
+  mục 1; không có yêu cầu tương tự cho Database Connection, mục 3).
+- Secret handling theo đúng pattern Step 6: `Source.config` chỉ lưu tên
+  biến môi trường chứa password (`passwordEnvVar`), không bao giờ lưu
+  password thật; `sanitize-config.ts` redact thêm 1 lớp phòng thủ ở
+  response.
+
+**Vấn đề gặp phải (trình tự thật):**
+1. `docs/plan-v4.md` không định nghĩa hạ tầng "Production Database" (chỉ
+   nhắc tên nguồn Tier 1 trong Rule 4, không nói gì về service riêng hay
+   schema phụ) — phải đọc lại đề bài gốc (PDF) để xác nhận đúng yêu cầu và
+   bảng mapping station→source trước khi code (chi tiết đầy đủ đã ghi
+   trong entry Step 7 gốc bên trên).
+2. Đây là quyết định kiến trúc chưa có sẵn (Postgres riêng vs MySQL) →
+   dừng lại, dùng `AskUserQuestion` hỏi người dùng trước khi code, thay vì
+   tự chọn.
+3. Bug tự phát hiện lúc review lại code trước khi báo cáo là xong (chưa
+   chạy `test:e2e` thật để Jest tự bắt ra): `runDatabaseCollection` khai
+   báo `let rows;` thiếu type annotation, ngầm thành `any` do
+   `noImplicitAny: false` — sửa bằng annotation tường minh trước khi báo
+   cáo. Xác nhận bằng TypeScript Compiler API (`ts.createProgram` +
+   `getTypeAtLocation`) in ra kiểu thật compiler suy luận, chứ không chỉ
+   tin `tsc --noEmit` sạch là đủ (bài học lặp lại từ Step 3).
+4. **Lần chạy `npm run test:e2e` đầu tiên trên máy Docker thật FAIL** —
+   thiếu biến môi trường `PRODUCTION_DB_PASSWORD` trong `backend/.env`.
+   Đúng cơ chế secret của Step 6 (`Source.config` chỉ lưu TÊN biến
+   env, không lưu giá trị), nhưng biến đó chưa được set trên máy chạy
+   test. Set đúng giá trị vào `backend/.env` (không commit, file đã
+   gitignore) rồi chạy lại → 31/31 pass.
+
+**Bằng chứng log thật (`npm run test:e2e`, dán nguyên văn):**
+```
+PASS test/database-collector.e2e-spec.ts
+PASS test/batch-lifecycle.e2e-spec.ts
+PASS test/collection-runs.e2e-spec.ts
+PASS test/app.e2e-spec.ts
+
+Test Suites: 4 passed, 4 total
+Tests:       31 passed, 31 total
+```
+
+**Việc chưa xong, chưa chặn tiến độ, ghi lại để không quên:**
+- Cảnh báo `Jest did not exit one second after the test run has completed.
+  This usually means there are asynchronous operations that weren't
+  stopped... Consider running Jest with --detectOpenHandles` (đã ghi nhận
+  từ Step 6, chưa điều tra) vẫn xuất hiện ở Step 7. Nghi ngờ (chưa xác
+  nhận): có thể cộng thêm 1 connection pool `pg` mới từ
+  `database-source-client.ts` chưa được đóng đúng lúc, ngoài nghi vấn cũ
+  của Step 6. Vẫn KHÔNG chặn tiến độ, nhưng nên điều tra sau khi Step 8
+  xong, trước khi nộp bài.
+
 ## Việc cần làm ở máy có Docker
 
 Checklist thủ công — làm ở máy laptop có Docker chạy được, sau khi pull code
@@ -1036,28 +1133,15 @@ mới nhất:
       trong entry "Step 6 — HOÀN TẤT, verify thật trên Postgres thật" bên
       trên. Sau đó `npm run verify:step6` chạy PASS thật (22/22 test:e2e),
       bằng chứng retry thật đã dán trong entry đó — không lặp lại ở đây.
-- [ ] **Step 7 — chưa verify, làm sau khi các mục trên xong**:
-      - `cd backend && npx prisma migrate dev` — schema có thêm cột
-        `sources.verified_at` (Step 7); nhớ bài học cạm bẫy #11 trong
-        `docs/HANDOFF.md` — `git status` NGAY sau khi migration mới được
-        tạo, đừng để lặp lại vụ migration history bị mất của Step 6.
-      - `docker compose up -d --build` — verify cả **4** service `backend`,
-        `postgres`, `fixture-api`, `production-db` lên `healthy`, dán log
-        thật (`production-db` health check là `pg_isready`, seed
-        `production-db/init.sql` chạy tự động lúc container khởi tạo lần
-        đầu — nếu volume `production_db_data` đã tồn tại từ trước, init.sql
-        KHÔNG tự chạy lại, cần `docker compose down -v` rồi `up` lại nếu
-        cần seed lại từ đầu).
-      - `cd backend && npm run test:e2e` — phải thấy
-        `database-collector.e2e-spec.ts` pass đủ: 2 case verify connection
-        (`test.each`), 1 case discover, 1 case select+collect, 1 case
-        collect-không-select, 4 case secret regression (3 endpoint
-        `test.each` + 1 log) — liệt kê từng case trong output, không tóm
-        tắt bằng số lượng.
-      - Chưa có `scripts/verify-step7.sh` riêng (ngoài phạm vi bắt buộc của
-        prompt Step 7 — xem entry Step 7 phía trên) — có thể viết sau, theo
-        đúng pattern `scripts/verify-step6.sh` nếu thấy cần lặp lại verify
-        nhiều lần.
-      - Sau khi có log thật ở trên: sửa lại đúng entry "Step 7" phía trên
-        (đổi trạng thái từ "CHƯA verify Docker thật" thành kết quả thật +
-        dán log), rồi mới đề xuất commit message thứ 2 cho phần verify.
+- [x] **Step 7 — đã verify thật.** `cd backend && npx prisma migrate dev`
+      (cột `sources.verified_at`), `docker compose up -d --build` (cả 4
+      service `backend`/`postgres`/`fixture-api`/`production-db` lên
+      `healthy`), rồi `npm run test:e2e` — PASS thật, 31/31 test, 4 suite
+      (`database-collector.e2e-spec.ts` + 3 suite cũ) — xem entry "Step 7 —
+      HOÀN TẤT, verify thật trên Postgres thật" bên trên cho bằng chứng log
+      thật đầy đủ. Lần chạy đầu tiên FAIL vì thiếu
+      `PRODUCTION_DB_PASSWORD` trong `backend/.env`, đã sửa (xem "Vấn đề
+      gặp phải" trong entry đó). Chưa có `scripts/verify-step7.sh` riêng
+      (ngoài phạm vi bắt buộc của prompt Step 7) — có thể viết sau, theo
+      đúng pattern `scripts/verify-step6.sh` nếu thấy cần lặp lại verify
+      nhiều lần.
