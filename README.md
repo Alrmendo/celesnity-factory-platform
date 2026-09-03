@@ -49,19 +49,19 @@ không lặp lại ở đây.
   đã wire Prisma Client thật (`CanonicalizationService.ingestAndRecompute`/
   `ingestBatch`, `ProductionDomainService.getBatchStatus`) với integration
   test riêng chạy trên Postgres thật (`npm run test:e2e`).
-- Integration test/seed script (Step 5) đã viết xong, đã tự verify được
-  wiring đúng cấu trúc (typecheck/lint sạch, chạy đúng tới bước gọi DB thật)
-  nhưng **chưa từng chạy thành công lần nào** — máy code lúc đó Docker
-  Desktop đang tắt. Xem mục
-  [Việc cần làm ở máy có Docker](#việc-cần-làm-ở-máy-có-docker) bên dưới,
-  còn 1 việc chưa tick.
-- Step 6 (code xong, **CHƯA verify Docker/integration/e2e thật** — xem entry
-  Step 6 bên dưới và mục
-  [Việc cần làm ở máy có Docker](#việc-cần-làm-ở-máy-có-docker)): collector
-  "Application API" thật (`SourcesModule`, `CollectionRunsModule`), service
-  fixture `fixture-api/` (mock Application API, có fault injection: HTTP 500
-  once/always, timeout), retry + backoff trong `CollectionRunsService`, và
-  secret handling (API key chỉ nằm trong env, không bao giờ ghi vào DB/log).
+- Integration test/seed script (Step 5) **đã verify THẬT** trên Postgres
+  thật — `npm run test:e2e` pass, 14/14 case `batch-lifecycle.e2e-spec.ts`
+  + 1/1 `app.e2e-spec.ts` (là 1 phần của lần chạy `npm run verify:step6`
+  ghi lại ở entry Step 6 cuối cùng bên dưới; checklist
+  [Việc cần làm ở máy có Docker](#việc-cần-làm-ở-máy-có-docker) đã tick đủ).
+- Step 6 **HOÀN TẤT, đã verify THẬT trên Postgres thật** (`npm run
+  verify:step6` PASS, xem entry "Step 6 — HOÀN TẤT, verify thật trên
+  Postgres thật" — entry cuối cùng của chuỗi Step 6 bên dưới, có bằng chứng
+  log thật): collector "Application API" thật (`SourcesModule`,
+  `CollectionRunsModule`), service fixture `fixture-api/` (mock Application
+  API, có fault injection: HTTP 500 once/always, timeout), retry + backoff
+  trong `CollectionRunsService`, và secret handling (API key chỉ nằm trong
+  env, không bao giờ ghi vào DB/log).
 - **Chưa làm**: collector Production Database (Step 7 — register/verify/
   discover/select/collect + secret handling riêng), Supplier Crawler
   (Step 8 — pagination loop protection), `ManagementEventsModule` ghi thật
@@ -442,9 +442,12 @@ task này).
 
 ### Step 6 — 2026-09-03
 
-**Trạng thái: code xong, verify OFFLINE pass — CHƯA verify Docker/
-integration/e2e thật (máy này không có Docker chạy được), chờ máy có
-Docker.**
+**Trạng thái: HOÀN TẤT — đã verify THẬT trên Postgres thật.** (Lúc viết
+entry này, dòng trạng thái ghi "code xong, verify OFFLINE pass — CHƯA
+verify Docker/integration/e2e thật, chờ máy có Docker" — đã lỗi thời từ khi
+đó; xem entry **"Step 6 — HOÀN TẤT, verify thật trên Postgres thật"** ở
+cuối chuỗi entry Step 6 bên dưới để xem toàn bộ quá trình debug thật (3 lần
+sửa/log riêng biệt) + bằng chứng log thật cuối cùng.)
 
 **Đã làm:**
 - `fixture-api/` (top-level, ngang hàng `backend/`/`frontend/`) — mock
@@ -719,6 +722,118 @@ trên. Phải chạy lại `npm run verify:step6` trên máy Docker thật mới
 chắc cả 3 lỗi (fetch/undici, routing 404, và lỗi Prisma `error_message`
 đang xử lý riêng) đã hết thật hay chưa.
 
+### Step 6 — HOÀN TẤT, verify thật trên Postgres thật — 2026-09-03
+
+`npm run verify:step6` chạy PASS thật trên máy có Docker, sau chuỗi debug ở
+3 entry phía trên cộng 1 vấn đề migration phát hiện thêm (dưới đây). Toàn
+bộ Step 6 (collector Application API thật, fault injection, retry, secret
+handling, script verify 1-lệnh) coi như xong và đã verify thật, không chỉ
+offline nữa.
+
+**Đã làm (tổng hợp lại đầy đủ, không chỉ trỏ ngược về entry cũ):**
+- `fixture-api/` — mock "Application API", plain Node `http` không
+  dependency, endpoint `GET /events` yêu cầu `x-api-key`, trả cố định 2
+  record DISPATCH (B006 quantity 480, B008 quantity 97) đúng
+  `docs/plan-v4.md` §3, có fault injection qua query param/env
+  (`none`/`500-once`/`500-always`/`timeout`), stateless (dùng header
+  `x-attempt` client tự tăng, không giữ state phía server).
+- Fault injection + retry logic thật trong `CollectionRunsService.
+  runCollection()`: retry tối đa 3 lần, backoff `50ms * 2^n`, timeout 2s/
+  request, không retry khi 401 (`retryable: false`). Ghi đúng 1 row
+  `collection_runs` (RUNNING → SUCCESS|FAILED) mỗi lần chạy.
+- Secret handling: `Source.config` chỉ lưu TÊN biến môi trường chứa API
+  key (`apiKeyEnvVar`), không bao giờ lưu giá trị secret thật; secret thật
+  chỉ đọc từ `process.env` lúc gọi, không bao giờ ghi xuống DB/log/response
+  (`sanitize-config.ts` là lớp phòng thủ thêm ở response).
+- `scripts/verify-step6.sh` — gộp preflight rebuild (`docker compose up -d
+  --build` + chờ `/health` 200) + `docker compose ps` + `npm run test:e2e`
+  đầy đủ + 1 lần gọi thật `POST /collection-runs` với `fault=500-once` +
+  tail log container `backend` cùng lúc, tất cả ghi vào 1 file log thật,
+  chạy qua `npm run verify:step6`.
+- Migration baselining (Prisma): xem "Vấn đề gặp phải" bên dưới — đưa
+  `backend/prisma/migrations/` (trước đó không tồn tại trong git, dù DB Step
+  2 đã có sẵn 9 bảng) về đúng trạng thái baseline khớp DB thật, để migration
+  mới của Step 6 (`error_message`) áp dụng được mà không phải drop/tạo lại
+  DB.
+
+**Vấn đề gặp phải (trình tự thật, đầy đủ 3 lần debug + 1 vấn đề migration):**
+1. **`docker compose ps`/`POST /sources` → 404 "Cannot POST /sources"**
+   (lần chạy `verify-step6.sh` đầu tiên). Route trong
+   `sources.controller.ts`/`main.ts` đều đúng (đã grep kỹ, xem entry "sửa 2
+   bug" phía trên) — nguyên nhân thật: container `backend` đang chạy image
+   cũ, build TRƯỚC KHI `SourcesController` có handler thật ở Step 6 (bản cũ
+   là `@Controller('sources')` rỗng, tự 404 mọi method). Sửa bằng preflight
+   `docker compose up -d --build` trong script.
+2. **Cùng lần đó, nghi vấn "fetch is not defined"** dẫn tới quyết định SAI:
+   đổi `fetch()` toàn cục sang `import { fetch } from 'undici'`. Quyết định
+   này dựa trên suy đoán chưa kiểm chứng đủ ("Node global fetch vẫn
+   experimental") — sau này xác nhận sai (Node 22, base image thật của
+   `backend/Dockerfile`, có `fetch` stable từ lâu). Việc đổi sang `undici`
+   còn gây ra bug MỚI: `TypeError: webidl.util.markAsUncloneable is not a
+   function`, crash 2/3 e2e suite ngay lúc load module. Đã REVERT lại dùng
+   `fetch` global, xoá `undici` khỏi `package.json` — xem 2 entry phía trên
+   ("sửa 2 bug" và "revert undici") cho toàn bộ chi tiết + bằng chứng
+   (`npm ls undici --all`, `grep "^import"` trên 3 file e2e). Nguyên nhân
+   thật của "fetch is not defined" ban đầu, nhìn lại, nhiều khả năng CŨNG
+   là do image cũ ở mục 1 — không liên quan gì đến fetch có tồn tại hay
+   không.
+3. **Migration history của Step 2 (`init_schema`) chưa từng được `git
+   add`/commit** — phát hiện khi thêm cột `collection_runs.error_message`
+   (Step 6) và chạy `npx prisma migrate dev` trên máy Docker: Prisma báo
+   `Unknown argument errorMessage`/lỗi migration history không khớp, vì DB
+   thật đã có sẵn 9 bảng từ Step 2 (áp dụng lúc đó, đúng như checklist Step
+   2 đã tick) nhưng thư mục `backend/prisma/migrations/` chứa lịch sử
+   migration đó chưa bao giờ được commit vào git (repo này chỉ có
+   `schema.prisma` + `seed.ts` trong `backend/prisma/`, xác nhận qua `git
+   ls-files backend/prisma`) — nên khi pull code sang máy Docker, Prisma
+   không thấy migration history nào để so khớp với DB thật đã tồn tại sẵn,
+   dẫn đến lệch trạng thái. Xử lý bằng **baselining**: dùng `prisma migrate
+   diff --from-empty --to-schema-datamodel prisma/schema.prisma --script`
+   để sinh lại đúng 1 migration SQL khớp schema hiện tại, rồi `prisma
+   migrate resolve --applied <tên migration>` để đánh dấu migration đó là
+   "đã áp dụng" mà KHÔNG chạy lại SQL (DB thật đã có sẵn đúng cấu trúc đó
+   rồi, chạy lại sẽ lỗi trùng bảng/cột) — **không mất data thật** nào trong
+   quá trình này. Bài học: `backend/prisma/migrations/` phải được `git add`
+   ngay từ lần `migrate dev` đầu tiên (Step 2), không phải việc có thể để
+   sau; chưa sửa lại lịch sử Step 2 trong README này (đúng chủ trương không
+   viết lại lịch sử, chỉ ghi nhận ở đây khi phát hiện).
+
+**Bằng chứng log thật (retry xảy ra đúng, kết quả cuối đúng kỳ vọng, trích
+nguyên văn):**
+```
+celesnity-backend | ... WARN [CollectionRunsService] Collection run
+8373a671-... (source 27b6cf50-...) attempt 1/3 failed: fixture API
+returned 500
+POST /collection-runs response: {"id":"8373a671-...","status":"SUCCESS",
+"recordsRead":2,"errorCount":1,"errorMessage":null,...}
+```
+Đọc đúng: attempt 1/3 thất bại vì fixture-api trả 500 (fault injection
+`500-once`), retry, attempt 2 thành công → `status: SUCCESS`,
+`recordsRead: 2`, `errorCount: 1` (đúng 1 lần fail trước khi thành công,
+khớp thiết kế ở `collection-runs.service.ts`), `errorMessage: null` (không
+có lỗi cuối cùng vì run kết thúc SUCCESS).
+
+`npm run test:e2e`: **22/22 pass thật** — 14 case
+`batch-lifecycle.e2e-spec.ts` (10 scenario `test.each` + idempotent
+recompute + recompute xét đủ lịch sử + B006 ACK_EXCEPTION + NotFoundException)
++ 7 case `collection-runs.e2e-spec.ts` (2 fault injection `test.each` + 3
+secret-endpoint `test.each` + 1 secret-log + 1 B006 end-to-end) + 1 case
+`app.e2e-spec.ts`.
+
+**Việc chưa xong, chưa chặn tiến độ, ghi lại để không quên:**
+- Jest in cảnh báo `Jest did not exit one second after the test run has
+  completed. This usually means there are asynchronous operations that
+  weren't stopped... Consider running Jest with --detectOpenHandles` sau
+  khi `test:e2e` đã pass hết. Nghi ngờ (chưa xác nhận): `PrismaService`
+  hoặc HTTP agent (`fetch`/connection keep-alive tới fixture-api) chưa được
+  đóng đúng ở cuối 1 số `afterAll`/`afterEach`. Không ảnh hưởng kết quả
+  pass/fail, chỉ là process không tự thoát gọn — để lại làm sau, chưa sửa.
+- Mỗi lần chạy `verify-step6.sh`, script tự tạo 1 `Source` mới qua `POST
+  /sources` (để lấy `sourceId` thật cho lần gọi fault-injection thủ công ở
+  bước 3) nhưng không xoá lại — mỗi lần chạy để lại 1 row rác trong DB dev.
+  Không ảnh hưởng tính đúng đắn của lần verify (mỗi lần vẫn tạo Source mới,
+  độc lập), chỉ là rác tích luỹ trong DB dev theo thời gian — chưa dọn.
+
 ## Việc cần làm ở máy có Docker
 
 Checklist thủ công — làm ở máy laptop có Docker chạy được, sau khi pull code
@@ -740,34 +855,17 @@ mới nhất:
       `ProductionDomainService` + transaction insert→recompute→update
       (Step 5 — code đã viết xong, đã typecheck/lint sạch; XEM MỤC DƯỚI —
       chưa chạy thành công lần nào vì Docker Desktop tắt lúc code).
-- [ ] **Việc còn lại — làm ngay khi Docker chạy được**: `docker compose up
-      --build`, sau đó `cd backend && npm run test:e2e` — phải thấy cả 5
-      test case trong `batch-lifecycle.e2e-spec.ts` VÀ `app.e2e-spec.ts` cũ
-      pass (app.e2e-spec.ts trước đây timeout vì cùng lỗi ESM ở trên, giờ
-      nên tự pass). Sau đó thử `npm run seed` 1 lần, xác nhận không lỗi.
-      Nếu `test:e2e` fail vì lý do khác ngoài "không tới được DB", đó là
-      vấn đề thật cần sửa, không phải môi trường.
-- [ ] **Step 6 — chưa verify, làm sau khi mục trên xong**:
-      - `cd backend && npx prisma migrate dev` — schema có thêm cột
-        `collection_runs.error_message` (Step 6) so với lần migrate trước;
-        cần migration mới (đặt tên vd `add_collection_run_error_message`)
-        thay vì tạo lại `init_schema` nếu DB cũ đã có sẵn 9 bảng.
-      - `docker compose up --build` — start 3 service `backend`, `postgres`,
-        `fixture-api` (chạy tay bước này, KHÔNG nằm trong script bên dưới —
-        xem lý do trong comment đầu file script).
-      - **`npm run verify:step6`** (chạy từ `backend/`, hoặc `bash
-        scripts/verify-step6.sh` từ gốc repo) — 1 lệnh gộp cả 3 việc: (1)
-        `docker compose ps` (verify healthy cả 3 service), (2) `npm run
-        test:e2e` đầy đủ (phải thấy `collection-runs.e2e-spec.ts` pass đủ: 2
-        case fault injection `test.each`, 4 case secret regression [3
-        endpoint `test.each` + 1 log check], 1 case B006 end-to-end qua
-        collector thật), (3) 1 lần gọi thật `POST /collection-runs` với
-        `fault: "500-once"` + tail log container `backend` cùng lúc (bắt
-        bằng chứng retry thật). Ghi TOÀN BỘ output thật (không tóm tắt số
-        lượng) vào `step6-verification-<timestamp>.log` ở gốc repo, kết
-        luận PASS/FAILED dựa theo exit code thật của `test:e2e` (không phải
-        theo 2 việc còn lại). Dán nguyên nội dung file log này vào đây.
-      - Sau khi có log thật ở trên: sửa lại đúng entry "Step 6" phía trên
-        (đổi trạng thái từ "CHƯA verify Docker/integration/e2e thật" thành
-        kết quả thật + dán log), rồi mới đề xuất commit message thứ 2 cho
-        phần verify.
+- [x] **`docker compose up --build`, sau đó `cd backend && npm run
+      test:e2e`** — đã pass thật, cả `batch-lifecycle.e2e-spec.ts` (14 case)
+      và `app.e2e-spec.ts` (1 case), là 1 phần của lần chạy `npm run
+      verify:step6` — xem entry "Step 6 — HOÀN TẤT, verify thật trên
+      Postgres thật" bên trên cho bằng chứng log thật.
+- [x] **Step 6 — đã verify thật.** Trình tự thật khác với dự tính ban đầu ở
+      đây một chút — migration cho `collection_runs.error_message` KHÔNG
+      chạy được bằng `npx prisma migrate dev` thẳng, vì migration history
+      của `init_schema` (Step 2) chưa từng được commit vào git; phải
+      baseline lại (`prisma migrate diff --from-empty` + `prisma migrate
+      resolve --applied`) trước — xem chi tiết đầy đủ ở "Vấn đề gặp phải"
+      trong entry "Step 6 — HOÀN TẤT, verify thật trên Postgres thật" bên
+      trên. Sau đó `npm run verify:step6` chạy PASS thật (22/22 test:e2e),
+      bằng chứng retry thật đã dán trong entry đó — không lặp lại ở đây.
