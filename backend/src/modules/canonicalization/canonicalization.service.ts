@@ -50,10 +50,12 @@ export class CanonicalizationService {
           batchId: record.batchId,
           station: record.station,
           // source_records has no dedicated quantity column — the raw
-          // payload carries it (mirrors what a real collector would store;
-          // {quantity} is the minimal faithful shape for this step's
-          // scope, since no real collector exists yet).
-          payload: { quantity: record.quantity },
+          // payload carries it (mirrors what a real collector would store).
+          // record.payload (Step 8 addition) merges in extra raw fields a
+          // collector wants to keep (e.g. the crawler's deliveryNumber/
+          // supplier) — undefined for Step 6/7, so their payload shape is
+          // unchanged ({ quantity } only).
+          payload: { quantity: record.quantity, ...record.payload },
           eventTime: record.eventTime,
           receivedAt: record.receivedAt,
         },

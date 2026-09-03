@@ -73,4 +73,12 @@ export interface NewSourceRecordInput {
   quantity: number;
   eventTime: Date;
   receivedAt: Date;
+  // Optional extra raw fields to merge into source_records.payload
+  // alongside `quantity` (Step 8 addition). Step 6/7 collectors never set
+  // this, so their persisted payload is byte-identical to before ({
+  // quantity } only) — see ingestAndRecompute. Step 8's crawler collector
+  // uses it to keep deliveryNumber/supplier (fields the task requires
+  // extracting from each row but that have no dedicated column anywhere in
+  // the schema) on the raw record for audit, rather than discarding them.
+  payload?: Record<string, unknown>;
 }

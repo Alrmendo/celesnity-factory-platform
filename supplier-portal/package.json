@@ -1,0 +1,10 @@
+{
+  "name": "supplier-portal",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Mock \"Supplier Portal\" fixture service (Step 8) — a locally hosted, paginated HTML supplier page with configurable malformed-row and pagination-loop fault injection, for testing the crawler collector's malformed-row handling and pagination-loop protection.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  }
+}

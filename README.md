@@ -81,24 +81,36 @@ không lặp lại ở đây.
   collect qua `SourcesController`/`CollectionRunsService`, DB collector
   KHÔNG retry (đúng phạm vi đề bài gốc — "Retry of transient failures" chỉ
   áp dụng cho Application API), secret handling cùng pattern Step 6.
-- **Chưa làm**: Supplier Crawler (Step 8 — pagination loop protection),
-  `ManagementEventsModule` ghi thật (POST block/resume/ack/note), và UI —
-  đều là bước tiếp theo sau Step 7.
+- Step 8 (code xong, **CHƯA verify Docker thật** — máy này không có
+  Docker; xem entry Step 8 bên dưới): collector "Supplier Crawler" thật —
+  service `supplier-portal` mới (HTML thật, phân trang, fault injection
+  malformed-row/pagination-loop), crawl qua regex parser tự viết (không
+  thêm dependency HTML-parsing ngoài), pagination loop protection (visited-
+  URL set + hard cap 50 trang), malformed row bị skip + ghi log/errorCount
+  mà KHÔNG fail cả run, mọi record crawl được gán cứng station RECEIVING,
+  KHÔNG retry (đúng đề bài gốc — chỉ Application API cần retry), KHÔNG có
+  secret (portal công khai, không auth).
+- **Chưa làm**: `ManagementEventsModule` ghi thật (POST block/resume/ack/
+  note) và UI — bước tiếp theo sau Step 8.
 
 Backend là modular monolith NestJS, 5 module nghiệp vụ:
 
 - `SourcesModule` — `POST /sources`, `GET /sources/:id` (Step 6); `POST
-  /sources/:id/verify`, `GET /sources/:id/discover`, `POST
-  /sources/:id/select` (Step 7, DATABASE source only); config JSON không
-  bao giờ chứa secret literal, sanitize thêm 1 lớp phòng thủ ở response
-  (xem `sanitize-config.ts`)
+  /sources/:id/verify`, `GET /sources/:id/discover` (Step 7 DATABASE +
+  Step 8 CRAWLER, dispatch theo `source.type` trong `SourcesService`),
+  `POST /sources/:id/select` (Step 7, DATABASE only — CRAWLER không có
+  bước select vì chỉ có đúng 1 deliveries feed, không có gì để chọn); config
+  JSON không bao giờ chứa secret literal, sanitize thêm 1 lớp phòng thủ ở
+  response (xem `sanitize-config.ts`)
 - `CollectionRunsModule` — `POST /collection-runs`, `GET
   /collection-runs/:id` (Step 6); reuse nguyên
   `CanonicalizationService.ingestBatch` để insert + recompute. Dispatch
   theo `source.type`: `API` → gọi fixture-api thật, có retry/backoff (Step
   6); `DATABASE` → query bảng đã chọn trên `production-db` thật, không
-  retry (Step 7, đúng phạm vi đề bài — "Retry of transient failures" chỉ
-  yêu cầu cho Application API)
+  retry (Step 7); `CRAWLER` → crawl `supplier-portal` thật (phân trang,
+  pagination-loop protection, malformed row bị skip không fail run), gán
+  cứng station RECEIVING, không retry (Step 8, đúng phạm vi đề bài —
+  "Retry of transient failures" chỉ yêu cầu cho Application API)
 - `CanonicalizationModule` — có pipeline Rule 1–5b + wiring Prisma thật
 - `ProductionDomainModule` — có logic Rule 6–7 + wiring Prisma thật
 - `ManagementEventsModule` — rỗng, chưa ghi được (chỉ đọc management_events
@@ -1098,6 +1110,219 @@ Tests:       31 passed, 31 total
   của Step 6. Vẫn KHÔNG chặn tiến độ, nhưng nên điều tra sau khi Step 8
   xong, trước khi nộp bài.
 
+### Step 8 — 2026-09-03
+
+**Trạng thái: code xong, verify OFFLINE pass — CHƯA verify Docker thật
+(máy này không có Docker chạy được), chờ máy có Docker.**
+
+**Quyết định kiến trúc — đã chốt sẵn từ đầu bài (không cần hỏi lại như Step 7):**
+- Khác Step 7 (phải dừng lại dùng `AskUserQuestion` vì đề không chỉ định hạ
+  tầng), lần này quyết định kiến trúc được giao sẵn: thêm service
+  `supplier-portal` trong `docker-compose.yml`, mirror pattern
+  `fixture-api`/`production-db`, trả về HTML thật (không phải JSON) có
+  phân trang — cố ý khác Step 6 để test đúng 2 rủi ro riêng của crawling
+  (pagination loop, malformed row) mà 1 REST API sạch không mô phỏng thật
+  được.
+- Trích nguyên văn đề bài gốc (không có trong `docs/plan-v4.md`) đã dùng
+  làm ground truth: "Provide a locally hosted, paginated supplier page.
+  Crawl: Delivery number, Supplier, Batch ID, Quantity, Delivery time, A
+  stable source-record identifier. Prevent pagination loops and report
+  malformed rows without failing the whole collection run."
+- Đối chiếu `docs/plan-v4.md`/`batch-scenarios.ts`: B002 đã là scenario
+  RECEIVING sẵn có ("single ACCEPTED at RECEIVING -> IN_PROGRESS", comment
+  gốc trong file) — dùng lại đúng batch này cho toàn bộ dữ liệu crawl-test,
+  không bịa batch/ID mới.
+
+**Đã làm:**
+- `supplier-portal/` (top-level, ngang hàng `fixture-api/`/`production-db/`/
+  `backend/`/`frontend/`) — mock "Supplier Portal", plain Node `http`, zero
+  dependency (mirror `fixture-api/`). `GET /deliveries?page=N` trả HTML
+  thật: 1 `<table>`, mỗi delivery là 1 `<tr data-source-record-id="...">`
+  (stable identifier — field riêng biệt với "delivery number", đúng 6
+  field đề bài liệt kê: delivery number/supplier/batch id/quantity/delivery
+  time nằm trong `<td class="...">`), `<div id="pagination"
+  data-total-pages="N">` + `<a rel="next" href="...">` khi còn trang kế.
+  KHÔNG auth — cố tình, vì đề mô tả đây là "a locally hosted, paginated
+  supplier page" công khai, khác hẳn Application API (Step 6, x-api-key)
+  và Production Database (Step 7, password) — không có test secret
+  regression cho Step 8 vì không có secret nào để rò rỉ.
+  - Fault injection qua query param `fault` (mirror pattern Step 6): `none`
+    (mặc định, 2 trang, 3 dòng hợp lệ, batchId = B002), `malformed` (1
+    trang, 3 dòng, dòng giữa có `quantity="N/A"` — sai định dạng số),
+    `loop` (trang 1 → trang 2 → **quay lại trang 1** — pagination loop thật).
+- `backend/src/modules/collection-runs/supplier-crawler-client.ts` (mới,
+  mirror `fixture-api-client.ts`/`database-source-client.ts`):
+  `checkReachable`, `discoverFeed`, `crawlDeliveries` — tự viết regex
+  parser (KHÔNG thêm dependency HTML-parsing ngoài như cheerio, đúng chỉ
+  dẫn "dừng lại xác nhận trước khi thêm" — không cần vì cả 2 đầu wire đều
+  tự kiểm soát, format HTML cố tình đơn giản/đều đặn).
+  - Pagination loop protection 2 lớp: (1) chính — `Set` các URL trang đã
+    crawl, phát hiện lặp thì abort ngay; (2) phòng thủ thêm — hard cap
+    `maxPages=50` (hằng số `MAX_CRAWL_PAGES` trong `collection-runs.service.ts`)
+    phòng trường hợp feed luôn sinh URL MỚI (không lặp lại nhưng không bao
+    giờ kết thúc).
+  - Malformed row: parse từng dòng độc lập, dòng thiếu field/sai định dạng
+    số/sai định dạng ngày bị gom vào `malformedRows[]` kèm lý do cụ thể,
+    KHÔNG throw — các dòng hợp lệ khác trong cùng trang/lần crawl vẫn được
+    giữ lại.
+- `backend/src/modules/collection-runs/types.ts`: thêm `CrawlerSourceConfig`
+  (`{ baseUrl, fault? }` — không có field secret nào).
+- `backend/src/modules/canonicalization/types.ts` +
+  `canonicalization.service.ts`: thêm field optional `payload?:
+  Record<string, unknown>` vào `NewSourceRecordInput`, merge vào
+  `source_records.payload` cạnh `quantity` khi có. Step 6/7 không set field
+  này nên payload của 2 collector đó giữ nguyên y hệt trước (`{ quantity }`
+  only) — addition thuần, không phải thay đổi hành vi. Dùng để giữ lại
+  `deliveryNumber`/`supplier` (2 trong 6 field đề bài yêu cầu trích xuất
+  nhưng không có cột riêng nào trong schema) trên raw record thay vì vứt
+  bỏ.
+- `backend/src/modules/collection-runs/collection-runs.service.ts`: thêm
+  `runCrawlerCollection` (dispatch theo `source.type === 'CRAWLER'`),
+  KHÔNG retry loop (đúng đề bài — chỉ Application API cần retry). Mọi
+  record crawl được gán cứng `station: 'RECEIVING'` (đề bài xác định
+  crawler là nguồn DUY NHẤT cho RECEIVING, không đọc station từ trang).
+  Malformed row KHÔNG làm fail run — tái dùng `errorCount`/`errorMessage`
+  có sẵn của `collection_runs` để ghi lại số dòng bị skip + lý do (giống
+  cách Step 6 dùng `errorCount` trên run SUCCESS để ghi "số lần fail trước
+  khi thành công"), không thêm cột schema mới. Pagination loop (hoặc chạm
+  backstop 50 trang) → run FAILED, KHÔNG ingest bất kỳ dòng nào đã đọc
+  được trước đó (xem "Quyết định phát sinh" bên dưới).
+- `backend/src/modules/sources/sources.service.ts`: `verifyConnection`/
+  `discoverSchema` tổng quát hoá để dispatch cả `DATABASE` (Step 7, không
+  đổi hành vi) lẫn `CRAWLER` (Step 8, mới) theo `source.type`; thêm
+  `resolveCrawlerConfig` (không resolve secret nào, khác
+  `resolveDatabaseConfig`). `selectTable` giữ nguyên DATABASE-only — gọi
+  trên CRAWLER sẽ throw `BadRequestException` rõ ràng (không có gì để
+  select).
+- `docker-compose.yml`: service `supplier-portal` mới (container port
+  4200, host port 4300, healthcheck kiểu `fixture-api`), `backend` thêm
+  `depends_on: supplier-portal: condition: service_healthy` (KHÔNG thêm
+  biến môi trường cố định nào — baseUrl của mỗi CRAWLER Source được cung
+  cấp trực tiếp lúc `POST /sources`, không có "1 địa chỉ cố định" cần biến
+  env, giống lý do Production Database's host/port/user không cần env
+  riêng ở Step 7).
+- `backend/.env.example`: thêm comment ghi chú host port 4300 cho
+  supplier-portal (không có biến bắt buộc nào, chỉ để tiện tra cứu khi
+  chạy backend trực tiếp trên host).
+- `backend/test/crawler-collector.e2e-spec.ts` (Step 8, DB thật +
+  supplier-portal in-process, mirror `collection-runs.e2e-spec.ts`):
+  `test.each` verify connection (portal reachable → thành công; portal
+  không reachable → thất bại, `verifiedAt` không đổi); discover trả đúng
+  `{ reachable: true, totalPages: 2 }`; crawl hết N trang hợp lệ → đúng 3
+  `source_records` qua 2 trang; malformed row → skip 1, ingest 2, run
+  SUCCESS, `errorMessage` có chi tiết; pagination loop → run FAILED, 0
+  `source_records` được ingest, app vẫn `GET /health` được; B002
+  end-to-end → `canonical_events['B002:RECEIVING']` ACCEPTED quantity=100,
+  `getBatchStatus('B002', ...)` trả `state=IN_PROGRESS`,
+  `currentStation=RECEIVING`. KHÔNG có secret regression test (không có
+  secret để test).
+- `scripts/verify-step8.sh` (`chmod +x`, `bash -n` sạch) — mirror
+  `verify-step6.sh`: preflight rebuild+health-check cả 5 service, `npm run
+  test:e2e` đầy đủ, 1 lần gọi thật `POST /collection-runs` với
+  `fault=malformed` + tail log backend bắt dòng warning "skipped malformed
+  row" thật. Script `verify:step8` trong `backend/package.json`. Viết
+  xong, KHÔNG tự chạy được (máy này không có Docker).
+
+**Vấn đề gặp phải:**
+- **Bug tự phát hiện qua smoke test thủ công** (không phải qua `test:e2e`
+  thật — máy này không chạy được `test:e2e`): `resolveNextUrl` ban đầu đưa
+  thẳng giá trị regex-extract của attribute `href="..."` vào `new URL()`
+  mà không unescape HTML entity trước. `supplier-portal/server.js` tự
+  escape `&` thành `&amp;` khi render href có nhiều query param (ví dụ
+  `?page=2&fault=loop` → `?page=2&amp;fault=loop`). Vì chuỗi `&amp;` VẪN
+  chứa 1 ký tự `&` thật ở đầu, `URLSearchParams` tách nhầm thành 2 param
+  `page=2` và `amp;fault=loop` (key sai `amp;fault`, không phải `fault`) —
+  hệ quả: mọi request sang trang kế thừa kế đều ÂM THẦM mất giá trị
+  `fault` thật, quay về default `none` của supplier-portal. Với fixture
+  `loop`, bug này khiến trang 2 bị phục vụ nhầm sang bộ dữ liệu `none`
+  (không loop) thay vì bộ `loop` thật — bài test pagination-loop sẽ pass
+  GIẢ (không phải vì code phát hiện loop đúng, mà vì bug khiến crawler
+  không bao giờ THẤY loop). Phát hiện bằng cách viết 1 script tạm
+  (`smoke-crawler-tmp.ts`, `ts-node` + `--compiler-options
+  {"module":"commonjs"}`, cùng pattern Step 5's seed script) gọi thẳng
+  `crawlDeliveries` qua supplier-portal in-process cho cả 3 fault mode và
+  in ra kết quả thật — thấy fixture `loop` không throw như kỳ vọng, truy
+  ngược ra đúng nguyên nhân. Sửa bằng cách `unescapeHtml()` giá trị href
+  trước khi đưa vào `new URL()`; chạy lại smoke test cả 3 mode → đúng kỳ
+  vọng (none: 3 rows/2 pages; malformed: 2 rows + 1 malformed đúng lý do;
+  loop: throw `SupplierCrawlerError` đúng thông báo "already crawled").
+  Script tạm đã xoá sau khi xác nhận, không commit. Bài học: y hệt tinh
+  thần Step 7's `let rows` — đừng chỉ tin code "trông đúng"/`tsc` sạch,
+  chủ động dựng 1 kịch bản chạy thật (dù offline) để tự phản chứng trước
+  khi báo cáo xong.
+- Không verify được cú pháp/hành vi thật của `docker-compose.yml`'s
+  service `supplier-portal` (build, healthcheck) qua Docker thật — máy
+  này không có Docker. Chỉ review bằng mắt (mirror chính xác cấu trúc
+  `fixture-api` đã verify thật ở Step 6) — **CHƯA verify chạy thật**, nằm
+  trong Phần B.
+- Không verify được `npm run test:e2e` thật (cần Postgres) —
+  `crawler-collector.e2e-spec.ts` mới CHƯA từng chạy qua Jest thật lần
+  nào, chỉ verify gián tiếp qua `tsc --noEmit` sạch, `eslint` sạch, và
+  smoke test thủ công ở trên xác nhận đúng logic
+  `supplier-crawler-client.ts` (không xác nhận được phần Nest DI/Prisma/
+  canonicalization integration thật) — **CHƯA verify chạy thật**, nằm
+  trong Phần B.
+
+**Quyết định phát sinh:**
+- Pagination loop (hoặc chạm backstop `maxPages`) → run kết thúc
+  **FAILED**, KHÔNG ingest bất kỳ dòng nào đã crawl được trước khi phát
+  hiện loop — chọn hướng này (thay vì SUCCESS với phần dữ liệu thu thập
+  được) vì nhất quán với bất biến đã có ở MỌI collector khác trong repo:
+  run FAILED luôn đồng nghĩa "không tin dữ liệu đã đọc, không ingest gì"
+  (Step 6 fault 500-always, Step 7 lỗi kết nối DB). Một loop có nghĩa hệ
+  thống không còn chắc chắn đã đọc hết/đúng toàn bộ feed — khác hẳn 1 dòng
+  malformed đơn lẻ (biết chắc DÒNG NÀO sai, các dòng khác vẫn đáng tin).
+- Malformed row KHÔNG cần cột schema mới — tái dùng
+  `collection_runs.errorCount`/`errorMessage` có sẵn từ Step 6 (encode
+  "skipped N malformed row(s): lý do..."), theo đúng tinh thần Step 6 đã
+  dùng `errorCount` linh hoạt cho "có trục trặc nhưng vẫn OK" thay vì chỉ
+  0/thành-công.
+- `NewSourceRecordInput` được thêm field optional `payload?` (thay vì mở
+  rộng `SourceRecordInput`/pipeline thuần Rule 1–5b của Step 3, giữ
+  nguyên không đổi) — chỉ chạm đúng type ghi (Step 5+, dùng bởi ingestion,
+  không phải pure canonicalization pipeline) để giảm rủi ro thay đổi lan
+  sang các unit test Step 3/4 đã pass.
+- CRAWLER không có bước "select" — khác DATABASE (Step 7, nhiều bảng để
+  chọn), supplier portal chỉ có đúng 1 deliveries feed, không có gì để
+  chọn giữa nhiều lựa chọn; `discoverSchema` cho CRAWLER trả `{ reachable,
+  totalPages }` thay vì danh sách bảng/cột, đúng gợi ý đơn giản hoá trong
+  chỉ dẫn Step 8.
+- "Delivery number" và "stable source-record identifier" được thiết kế là
+  2 field TÁCH BIỆT trong fixture HTML (`<td class="delivery-number">` vs
+  `<tr data-source-record-id="...">`) dù giá trị nào cũng có thể dùng làm
+  định danh — đúng theo cách đề bài liệt kê chúng như 2 mục riêng trong
+  danh sách 6 field, không gộp làm 1 để tránh đọc sai yêu cầu.
+- Toàn bộ dữ liệu crawl-test dùng batchId `B002` — không tạo batch/ID mới,
+  đúng chỉ dẫn "tìm đúng scenario liên quan, đừng bịa thêm"; B002 là
+  scenario RECEIVING-only sẵn có trong `batch-scenarios.ts` ("single
+  ACCEPTED at RECEIVING -> IN_PROGRESS").
+- KHÔNG cần migration Prisma mới cho Step 8 (không có cột/bảng nào thêm
+  vào `schema.prisma`) — khác Step 6 (`errorMessage`) và Step 7
+  (`verifiedAt`), nên bài học cạm bẫy #11 (`docs/HANDOFF.md`, migration
+  chưa `git add`) không áp dụng ở Step 8 theo cách trực tiếp; vẫn nhắc lại
+  trong Phần B để không quên nếu sau này có đổi ý thêm cột.
+
+**Verify OFFLINE (không cần Docker/Postgres — chỉ cần Node):**
+- `npx tsc --noEmit` sạch toàn repo.
+- `npx eslint "{src,apps,libs,test}/**/*.ts"` sạch toàn repo (chạy lại sau
+  `--fix`, đúng bài học Step 3/6).
+- `npm run test`: vẫn 22/22 pass, không case nào mới (mọi test Step 8 đều
+  đụng DB thật nên nằm ở `test:e2e`, chưa chạy được) — dán nguyên output:
+  ```
+  PASS src/app.controller.spec.ts
+  PASS src/modules/canonicalization/canonicalization.pipeline.spec.ts
+  PASS src/modules/production-domain/batch-state.spec.ts
+  PASS src/modules/production-domain/freshness.spec.ts
+
+  Test Suites: 4 passed, 4 total
+  Tests:       22 passed, 22 total
+  ```
+- Smoke test thủ công KHÔNG đụng Postgres (script tạm
+  `smoke-crawler-tmp.ts`, đã xoá sau khi chạy, xem "Vấn đề gặp phải"): xác
+  nhận `checkReachable`/`discoverFeed`/`crawlDeliveries` đúng hành vi cho
+  cả 3 fault mode qua supplier-portal in-process thật (không mock).
+- `bash -n scripts/verify-step8.sh` sạch.
+
 ## Việc cần làm ở máy có Docker
 
 Checklist thủ công — làm ở máy laptop có Docker chạy được, sau khi pull code
@@ -1145,3 +1370,24 @@ mới nhất:
       (ngoài phạm vi bắt buộc của prompt Step 7) — có thể viết sau, theo
       đúng pattern `scripts/verify-step6.sh` nếu thấy cần lặp lại verify
       nhiều lần.
+- [ ] **Step 8 — chưa verify, làm sau khi các mục trên xong**:
+      - Không có migration Prisma mới ở Step 8 (không đổi `schema.prisma`)
+        — bước `npx prisma migrate dev` KHÔNG cần chạy lại vì Step 8, chỉ
+        nhắc lại cạm bẫy #11 (`docs/HANDOFF.md`) đề phòng nếu có thay đổi
+        schema phát sinh khi verify thật.
+      - `docker compose up -d --build` — verify cả **5** service
+        `backend`, `postgres`, `fixture-api`, `production-db`,
+        `supplier-portal` lên `healthy`, dán log thật.
+      - `cd backend && npm run test:e2e` — phải thấy
+        `crawler-collector.e2e-spec.ts` pass đủ: 2 case verify connection
+        (`test.each`), 1 case discover, 1 case crawl-N-trang-hợp-lệ, 1 case
+        malformed-row, 1 case pagination-loop, 1 case B002 end-to-end —
+        liệt kê từng case trong output, không tóm tắt bằng số lượng. Đồng
+        thời xác nhận 3 suite e2e cũ (Step 5/6/7) vẫn pass, tổng cộng phải
+        ra một con số thật (không đoán trước).
+      - `npm run verify:step8` (`scripts/verify-step8.sh`, đã viết + `bash
+        -n` sạch, xem entry Step 8) — chạy thật lần đầu, dán log thật vào
+        `step8-verification-<timestamp>.log`.
+      - Sau khi có log thật ở trên: sửa lại đúng entry "Step 8" phía trên
+        (đổi trạng thái từ "CHƯA verify Docker thật" thành kết quả thật +
+        dán log), rồi mới đề xuất commit message thứ 2 cho phần verify.

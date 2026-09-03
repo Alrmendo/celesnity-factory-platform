@@ -49,6 +49,12 @@ services:
       # Source.config when a Source is registered (POST /sources), not via
       # env — only the credential is indirected.
       PRODUCTION_DB_PASSWORD: ${PRODUCTION_DB_PASSWORD:-prod-db-secret-password}
+      # Step 8: no fixed env var here on purpose — unlike fixture-api/
+      # production-db, a CRAWLER Source's baseUrl is supplied directly in
+      # Source.config at registration time (POST /sources), not read from
+      # a static env var, because the supplier portal needs no secret at
+      # all (see collection-runs/types.ts's CrawlerSourceConfig). backend
+      # still depends_on it below purely for startup ordering.
     ports:
       - "3001:3001"
     depends_on:
@@ -57,6 +63,8 @@ services:
       fixture-api:
         condition: service_healthy
       production-db:
+        condition: service_healthy
+      supplier-portal:
         condition: service_healthy
 
   # Step 6: mock "Application API" — see fixture-api/server.js.
@@ -108,6 +116,37 @@ services:
       - ./production-db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${PRODUCTION_DB_USER:-prod_reader} -d ${PRODUCTION_DB_NAME:-production}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Step 8: "Supplier Portal" — a locally hosted, paginated HTML page
+  # standing in for a real supplier's delivery-record portal (see
+  # supplier-portal/server.js). Zero dependencies, no custom build step
+  # needed beyond copying the two files (mirrors fixture-api). No secret —
+  # the assessment describes this as a public page, not a credentialed API.
+  supplier-portal:
+    build:
+      context: ./supplier-portal
+    container_name: celesnity-supplier-portal
+    restart: unless-stopped
+    environment:
+      PORT: 4200
+      # Default fault mode for the long-running compose instance — keep
+      # "none" so the app behaves normally; override per-run for manual
+      # malformed-row/pagination-loop testing (see README "Việc cần làm ở
+      # máy có Docker").
+      SUPPLIER_PORTAL_FAULT_MODE: ${SUPPLIER_PORTAL_FAULT_MODE:-none}
+    ports:
+      - "4300:4200"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "require('http').get('http://localhost:4200/health', r => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))",
+        ]
       interval: 5s
       timeout: 5s
       retries: 10

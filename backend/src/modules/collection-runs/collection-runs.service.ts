@@ -17,11 +17,20 @@ import {
   FixtureEvent,
 } from './fixture-api-client';
 import { redactSecret } from './redact';
-import { FixtureApiSourceConfig } from './types';
+import {
+  crawlDeliveries,
+  SupplierCrawlerError,
+} from './supplier-crawler-client';
+import { CrawlerSourceConfig, FixtureApiSourceConfig } from './types';
 
 const MAX_ATTEMPTS = 3;
 const BACKOFF_BASE_MS = 50;
 const REQUEST_TIMEOUT_MS = 2000;
+// Step 8 pagination-loop guard backstop — see supplier-crawler-client.ts's
+// crawlDeliveries comment. 50 is comfortably above any real supplier
+// portal's page count for this assessment's scope, while still bounding a
+// pathological "always a new next URL" feed.
+const MAX_CRAWL_PAGES = 50;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -56,6 +65,9 @@ export class CollectionRunsService {
 
     if (source.type === 'DATABASE') {
       return this.runDatabaseCollection(source);
+    }
+    if (source.type === 'CRAWLER') {
+      return this.runCrawlerCollection(source);
     }
     return this.runApiCollection(source);
   }
@@ -232,6 +244,109 @@ export class CollectionRunsService {
         finishedAt: new Date(),
         recordsRead: records.length,
         errorCount: 0,
+      },
+    });
+  }
+
+  /**
+   * Step 8 — Supplier Crawler. No retry loop here, same reasoning as Step
+   * 7's DB collector: the assessment's Data Crawler requirement only asks
+   * for "prevent pagination loops" and "report malformed rows without
+   * failing the whole run" — nothing about retrying transient failures
+   * (that's stated only for Application API). Every crawl-able record
+   * always gets station RECEIVING — the task's mapping table names the
+   * crawler as RECEIVING's single source, so station is assigned by this
+   * collector, never read off the page.
+   */
+  private async runCrawlerCollection(source: Source): Promise<CollectionRun> {
+    const sourceId = source.id;
+    const connectionConfig = source.config as unknown as CrawlerSourceConfig;
+
+    const run = await this.prisma.collectionRun.create({
+      data: { sourceId, startedAt: new Date(), status: 'RUNNING' },
+    });
+
+    let crawlResult: Awaited<ReturnType<typeof crawlDeliveries>>;
+    try {
+      crawlResult = await crawlDeliveries(
+        connectionConfig.baseUrl,
+        connectionConfig.fault,
+        MAX_CRAWL_PAGES,
+        REQUEST_TIMEOUT_MS,
+      );
+    } catch (err) {
+      const errorMessage =
+        err instanceof SupplierCrawlerError
+          ? err.message
+          : err instanceof Error
+            ? err.message
+            : 'unknown collection error';
+      this.logger.warn(
+        `Collection run ${run.id} (source ${sourceId}) failed: ${errorMessage}`,
+      );
+      // A loop (or the max-pages backstop) means we can no longer trust
+      // that what was read so far is the real, complete feed — nothing
+      // gathered before the failure is ingested, same invariant as every
+      // other FAILED run in this service (recordsRead stays 0).
+      return this.prisma.collectionRun.update({
+        where: { id: run.id },
+        data: {
+          status: 'FAILED',
+          finishedAt: new Date(),
+          errorCount: 1,
+          errorMessage,
+        },
+      });
+    }
+
+    for (const malformed of crawlResult.malformedRows) {
+      this.logger.warn(
+        `Collection run ${run.id} (source ${sourceId}) skipped malformed row on page ${malformed.page}: ${malformed.reason}`,
+      );
+    }
+
+    // Explicit `(r): NewSourceRecordInput =>` return-type annotation
+    // (rather than relying on the `const records: NewSourceRecordInput[]`
+    // declaration to contextually type the callback) so the literal
+    // 'RECEIVING' below is checked against the `Station` union directly —
+    // same caution as the Step 7 `let rows;`-without-annotation bug
+    // (README's Step 7 log): don't rely on inference reaching into a
+    // callback when an explicit annotation removes the question entirely.
+    const records: NewSourceRecordInput[] = crawlResult.rows.map(
+      (r): NewSourceRecordInput => ({
+        sourceId,
+        collectionRunId: run.id,
+        sourceRecordId: r.sourceRecordId,
+        batchId: r.batchId,
+        station: 'RECEIVING',
+        quantity: r.quantity,
+        eventTime: r.deliveryTime,
+        receivedAt: new Date(),
+        payload: { deliveryNumber: r.deliveryNumber, supplier: r.supplier },
+      }),
+    );
+
+    await this.canonicalizationService.ingestBatch(records);
+
+    const malformedCount = crawlResult.malformedRows.length;
+    return this.prisma.collectionRun.update({
+      where: { id: run.id },
+      data: {
+        status: 'SUCCESS',
+        finishedAt: new Date(),
+        recordsRead: records.length,
+        // Malformed rows don't fail the run (task requirement) but are
+        // still "error info" worth recording — reuses errorCount/
+        // errorMessage exactly like Step 6 uses errorCount on a SUCCESS
+        // run to record failed-attempts-before-success, rather than adding
+        // a new schema column for this.
+        errorCount: malformedCount,
+        errorMessage:
+          malformedCount > 0
+            ? `skipped ${malformedCount} malformed row(s): ${crawlResult.malformedRows
+                .map((m) => `page ${m.page} (${m.reason})`)
+                .join('; ')}`
+            : null,
       },
     });
   }

@@ -14,8 +14,16 @@ import {
   verifyConnection,
 } from '../collection-runs/database-source-client';
 import { redactSecret } from '../collection-runs/redact';
+import {
+  checkReachable,
+  discoverFeed,
+  SupplierCrawlerError,
+} from '../collection-runs/supplier-crawler-client';
+import { CrawlerSourceConfig } from '../collection-runs/types';
 import { sanitizeSourceConfig } from './sanitize-config';
 import type { CreateSourceDto, SourceResponse } from './types';
+
+const VERIFY_TIMEOUT_MS = 2000;
 
 @Injectable()
 export class SourcesService {
@@ -41,13 +49,31 @@ export class SourcesService {
   }
 
   /**
-   * Step 7 "Register and verify the database connection before use": a
-   * real `SELECT 1` against the target DB. On success, records
+   * "Register and verify [the source] before use" — Step 7 (DATABASE): a
+   * real `SELECT 1` against the target DB. Step 8 (CRAWLER): a real GET
+   * against the supplier portal's deliveries feed. On success, records
    * `verifiedAt`. On failure, throws — deliberately does NOT touch
    * `verifiedAt` (a failed verify never claims a past success).
    */
   async verifyConnection(id: string): Promise<SourceResponse> {
     const source = await this.getRawOrThrow(id);
+
+    if (source.type === 'CRAWLER') {
+      const config = this.resolveCrawlerConfig(source);
+      try {
+        await checkReachable(config.baseUrl, VERIFY_TIMEOUT_MS);
+      } catch (err) {
+        const message =
+          err instanceof SupplierCrawlerError ? err.message : String(err);
+        throw new BadRequestException(message);
+      }
+      const updated = await this.prisma.source.update({
+        where: { id },
+        data: { verifiedAt: new Date() },
+      });
+      return this.toResponse(updated);
+    }
+
     const { config, password } = this.resolveDatabaseConfig(source);
 
     try {
@@ -65,9 +91,29 @@ export class SourcesService {
     return this.toResponse(updated);
   }
 
-  /** Step 7 "Discover available tables and columns" — real introspection. */
-  async discoverSchema(id: string): Promise<DiscoveredTable[]> {
+  /**
+   * "Discover [the source's schema]" — Step 7 (DATABASE): real
+   * information_schema introspection (tables/columns). Step 8 (CRAWLER):
+   * simpler, per the task instructions — no tables/columns to choose
+   * between (the portal exposes exactly one deliveries feed), so this just
+   * confirms the feed is reachable and reports how many pages it has.
+   */
+  async discoverSchema(
+    id: string,
+  ): Promise<DiscoveredTable[] | { reachable: true; totalPages: number }> {
     const source = await this.getRawOrThrow(id);
+
+    if (source.type === 'CRAWLER') {
+      const config = this.resolveCrawlerConfig(source);
+      try {
+        return await discoverFeed(config.baseUrl, VERIFY_TIMEOUT_MS);
+      } catch (err) {
+        const message =
+          err instanceof SupplierCrawlerError ? err.message : String(err);
+        throw new BadRequestException(message);
+      }
+    }
+
     const { config, password } = this.resolveDatabaseConfig(source);
 
     try {
@@ -129,7 +175,7 @@ export class SourcesService {
   } {
     if (source.type !== 'DATABASE') {
       throw new BadRequestException(
-        `Source ${source.id} is type ${source.type}, not DATABASE — verify/discover/select only apply to DATABASE sources`,
+        `Source ${source.id} is type ${source.type}, not DATABASE — select (and verify/discover for non-CRAWLER types) only applies to DATABASE sources`,
       );
     }
     const config = source.config as unknown as DatabaseSourceConfig;
@@ -140,6 +186,17 @@ export class SourcesService {
       );
     }
     return { config, password };
+  }
+
+  // Step 8: CRAWLER sources carry no secret (see CrawlerSourceConfig's
+  // comment) — nothing to resolve from env, unlike resolveDatabaseConfig.
+  private resolveCrawlerConfig(source: Source): CrawlerSourceConfig {
+    if (source.type !== 'CRAWLER') {
+      throw new BadRequestException(
+        `Source ${source.id} is type ${source.type}, not CRAWLER`,
+      );
+    }
+    return source.config as unknown as CrawlerSourceConfig;
   }
 
   private toResponse(source: Source): SourceResponse {
