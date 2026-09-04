@@ -126,8 +126,13 @@ không lặp lại ở đây.
   dụng nguyên `ProductionDomainService.getBatchStatus`, không viết lại
   logic domain). `STALE_THRESHOLD_MINUTES` (env var, default 15) giờ
   configurable. Chỉ backend — chưa có code frontend.
-- **Chưa làm**: UI (2 màn Data Sources + Production Lines) — bước tiếp
-  theo sau Step 10.
+- Step 11 (frontend, **build sạch — CHƯA tự click-test trên trình duyệt
+  thật**, máy này không có Docker; xem entry "Step 11" bên dưới): Data
+  Sources view (`frontend/app/sources/`, `frontend/app/canonical-events/`)
+  — register/verify/discover/select/run collection/lịch sử/preview
+  provenance, gọi thẳng các endpoint Step 6–10 qua `lib/api.ts`.
+- **Chưa làm**: Production Lines view (Step 12) — bước tiếp theo sau
+  Step 11.
 
 Backend là modular monolith NestJS, 5 module nghiệp vụ:
 
@@ -2118,6 +2123,207 @@ Cảnh báo `Jest did not exit... --detectOpenHandles` vẫn xuất hiện — �
 ghi nhận từ Step 6, chưa điều tra, không chặn tiến độ (không phải lỗi
 mới của Step 10).
 
+### Step 11 — Data Sources UI — 2026-09-04
+
+**Trạng thái: build sạch (`tsc --noEmit`/`eslint`/`npm run build` đều
+sạch) — CHƯA tự click-test bằng mắt trên trình duyệt thật (máy này không
+có Docker, không tự chạy `docker compose up` để mở `http://localhost:3000`
+thật). Chỉ làm frontend — không sửa code backend nào.**
+
+**Audit trước khi code:**
+- `frontend/` là Next.js 16.3.4 + React 19.2.8, **App Router**
+  (`frontend/app/`, có `layout.tsx`/`page.tsx`/`page.module.css`, KHÔNG có
+  thư mục `pages/`) — route mới thêm theo đúng convention này
+  (`app/<route>/page.tsx`), không trộn Pages Router.
+- `app/page.tsx` (Step 1, có sẵn) là **Client Component** (`'use client'`)
+  fetch `GET /health` qua `NEXT_PUBLIC_API_URL` bằng `useEffect` +
+  `useState` thuần, KHÔNG dùng Server Component data-fetching/Server
+  Actions nào. Toàn bộ route mới ở Step 11 giữ đúng 1 pattern này (client
+  component + fetch trực tiếp tới backend) để nhất quán, không trộn 2 kiến
+  trúc data-fetching khác nhau trong cùng 1 app nhỏ.
+- `AGENTS.md`/`CLAUDE.md` (tự sinh bởi `next dev`, đã có sẵn) cảnh báo
+  Next.js bản này có breaking changes so với dữ liệu huấn luyện, phải đọc
+  `node_modules/next/dist/docs/` trước khi viết code — đã đọc
+  `01-app/01-getting-started/03-layouts-and-pages.md` và
+  `01-app/03-api-reference/03-file-conventions/page.md`,
+  `01-app/03-api-reference/04-functions/use-search-params.md` trước khi
+  code (xem "Quyết định phát sinh" bên dưới về `params`/`searchParams` là
+  `Promise` + React `use()`).
+- Đọc lại `backend/README.md`'s "Nhật ký triển khai" Step 6–10 để lấy
+  đúng shape response từng endpoint (không đoán field) — dùng làm ground
+  truth cho `frontend/lib/api.ts` (xem "Đã làm").
+
+**Đã làm:**
+- `frontend/lib/api.ts` (mới) — 1 chỗ duy nhất định nghĩa `API_URL`, hàm
+  `apiFetch<T>` dùng chung (parse lỗi theo đúng shape Nest mặc định
+  `{ statusCode, message, error }`, `message` luôn là string vì backend
+  không dùng `class-validator`/`ValidationPipe` ở đâu — đã xác nhận lại
+  trong README Step 6), và toàn bộ type + hàm gọi API mirror đúng
+  README/`backend/src/**/types.ts`:
+  - `Source`/`CreateSourceDto`/`listSources`/`getSource`/`createSource`/
+    `verifySource`/`discoverSource`/`selectSourceTable` (Step 6/7/8/10).
+    `CreatableSourceType = 'API' | 'DATABASE' | 'CRAWLER'` — loại trừ
+    `MQTT` khỏi form tạo mới (`SourceType` Prisma enum có `MQTT` nhưng
+    KHÔNG collector/config shape nào cho nó tồn tại ở Step 6–8, tạo 1
+    Source `MQTT` sẽ không có action nào dùng được).
+  - `CollectionRun`/`CollectionRunHistoryEntry` (thêm `durationMs`, chỉ
+    có ở response Step 10)/`runCollection`/`listCollectionRuns` (Step
+    6/10).
+  - `CanonicalEvent`/`CanonicalEventSourceLink`/`listCanonicalEvents`
+    (Step 10) — đúng field `sources[]` provenance (`relationship`,
+    `sourceRecordPk`, `sourceRecordId`, `sourceId`, `sourceName`,
+    `sourceType`, `collectionRunId`, `eventTime`, `receivedAt`).
+- `app/sources/page.tsx` (mới) — mục 1+2 checklist:
+  - Bảng list `GET /sources` — name/type/verifiedAt (hoặc "chưa verify")/
+    link "Manage" sang `/sources/:id`.
+  - Form "Register new source" — field config đổi theo `type` chọn
+    (`API`: `baseUrl`/`apiKeyEnvVar`/`fault?`; `DATABASE`:
+    `host`/`port`/`database`/`user`/`passwordEnvVar`; `CRAWLER`:
+    `baseUrl`/`fault?`) — **KHÔNG có input nhập password/API key thật**,
+    chỉ nhập TÊN biến môi trường (`passwordEnvVar`/`apiKeyEnvVar`), đúng
+    thiết kế secret handling đã có từ Step 6/7 (`Source.config` không bao
+    giờ chứa secret literal). Field rỗng (`fault`) bị lọc ra trước khi
+    `POST /sources`, không gửi chuỗi rỗng.
+- `app/sources/[id]/page.tsx` (mới) — mục 3–7 checklist, 1 trang chi tiết
+  gộp toàn bộ luồng còn lại của 1 Source:
+  - "Verify connection" → `POST /sources/:id/verify` — chỉ hiện với
+    `DATABASE`/`CRAWLER` (`SourcesService.verifyConnection` ném 400 cho
+    `API`/`MQTT`, xem `resolveDatabaseConfig`'s type check — UI không mời
+    gọi 1 action chắc chắn lỗi).
+  - "Discover schema" → `GET /sources/:id/discover` — cùng điều kiện hiện
+    trên. Render khác nhau theo shape trả về: bảng `table`/`columns` nếu
+    là mảng (`DATABASE`), hoặc `reachable`/`totalPages` nếu là object
+    (`CRAWLER`) — dùng type guard `isDiscoveredTables` (thêm vào
+    `lib/api.ts`) để phân biệt, không đoán bằng field lẻ.
+  - "Select table to collect" → `POST /sources/:id/select` — chỉ hiện với
+    `DATABASE`; dropdown chỉ có dữ liệu SAU khi đã Discover thành công
+    trong phiên hiện tại (không tự gọi lại discover ngầm) — đúng luồng
+    "3. Select what should be collected" đứng sau "2. Discover".
+  - "Run collection" → `POST /collection-runs` — hiện cho MỌI type (route
+    backend không giới hạn type), hiển thị kết quả ngay
+    (status/recordsRead/errorCount/errorMessage).
+  - Bảng "Collection run history" → `GET /collection-runs?sourceId=` —
+    status/duration (`durationMs`, `—` khi còn `null`)/records/errors/
+    errorMessage, mỗi dòng có link "Preview" sang
+    `/canonical-events?sourceId=<id>&collectionRunId=<runId>`.
+- `app/canonical-events/page.tsx` (mới) — mục 8 checklist: đọc filter từ
+  `searchParams` (`batchId`/`sourceId`/`collectionRunId`, dùng
+  `React.use()` trên prop `searchParams: Promise<...>` của page — xem
+  "Quyết định phát sinh"), gọi `GET /canonical-events?...`, render mỗi
+  canonical event kèm bảng provenance đầy đủ (relationship/source name+
+  type/source record id/collection run id/eventTime/receivedAt), có link
+  ngược lại `/sources/:id` (theo `sourceId`) và lọc lại theo
+  `collectionRunId`. Không có form filter riêng — đến từ link "Preview"
+  ở trang chi tiết source, đúng gợi ý "có thể chỉ cần link đơn giản" của
+  đề bài.
+- Mục 9 (error handling): mọi page dùng chung pattern `phase: 'loading' |
+  'success' | 'error'` (hoặc thêm `'idle'` cho action do người dùng bấm)
+  — fetch fail (network/4xx/5xx) hiển thị `<p style={{color:'red'}}>`,
+  KHÔNG throw ra ngoài render (mọi lỗi bắt trong `.catch`), không crash
+  trắng trang.
+- `app/page.tsx`: thêm 1 link `Data Sources →` sang `/sources` (thay đổi
+  tối thiểu, chỉ thêm 1 dòng JSX, không đổi logic health-check có sẵn).
+
+**Vấn đề gặp phải:**
+- `tsc --noEmit` báo lỗi thật ở `app/sources/[id]/page.tsx`: dùng chung 1
+  type `Action<T>` (4 nhánh `idle|loading|success|error`) cho cả state
+  fetch-lúc-mount (`source`, `history`) lẫn state hành động do người dùng
+  bấm (`verify`, `discover`, `select`, `run`) — sau khi early-return cho
+  `loading`/`error` của `source`, TypeScript chỉ loại được 2 nhánh đó
+  khỏi *type*, còn `idle` (nhánh KHÔNG BAO GIỜ thực sự xảy ra với
+  `source`, vì state này luôn bắt đầu `loading` rồi fetch ngay) vẫn còn
+  trong type nên `source.data` báo lỗi "does not exist on type ...
+  idle". Sửa bằng cách tách riêng 1 type `LoadState<T>` (3 nhánh, không có
+  `idle`) dùng cho `source`/`history`, giữ `Action<T>` (4 nhánh) cho 4
+  action còn lại — đúng bản chất 2 loại state khác nhau, không phải ép
+  kiểu qua loa.
+- `eslint` (rule mới `react-hooks/set-state-in-effect`, có trong
+  `eslint-config-next@16.3.4`) báo lỗi ở cả 3 trang: gọi `setState({phase:
+  'loading'})` làm câu lệnh ĐỒNG BỘ ngay trong thân `useEffect` (hoặc
+  trong 1 hàm được gọi trực tiếp, đồng bộ, từ trong `useEffect`) bị coi là
+  anti-pattern (cascading render) theo rule mới này. Sửa bằng cách tách
+  mỗi cặp `fetchX`/`refreshX`: `fetchX()` chỉ fetch + `setState` bên trong
+  `.then`/`.catch` (không có `setState` đồng bộ nào ở đầu hàm — dùng cho
+  effect lúc mount, vì `useState` khởi tạo sẵn `{ phase: 'loading' }` nên
+  không cần set lại); `refreshX()` = `setState({phase:'loading'})` rồi
+  gọi `fetchX()` (dùng cho các event handler sau khi mutate dữ liệu —
+  KHÔNG nằm trong effect nên rule này không áp dụng). `useEffect` giờ chỉ
+  gọi thẳng `fetchX`, không qua `refreshX` nữa.
+
+**Quyết định phát sinh:**
+- `params`/`searchParams` của page là `Promise` (xác nhận qua
+  `node_modules/next/dist/docs`, không phải đoán/nhớ từ bản Next cũ) —
+  đọc bằng React's `use()` hook ngay trong Client Component page
+  (`app/sources/[id]/page.tsx`'s `use(params)`,
+  `app/canonical-events/page.tsx`'s `use(searchParams)`), theo đúng
+  pattern tài liệu chính thức liệt kê cho Client Component pages — KHÔNG
+  dùng `useSearchParams()` hook (cách đó đòi hỏi bọc `<Suspense>` để
+  tránh lỗi prerender, phức tạp hơn cần thiết cho phạm vi Step 11).
+- KHÔNG dùng helper type `PageProps<'/route/[param]'>` (Next 16 có auto-
+  generate type này, thấy trong tài liệu và trong `layout.tsx` có sẵn
+  dùng `LayoutProps<"/">`) — dùng thẳng type `Promise<{...}>` viết tay,
+  vì `PageProps` chỉ được sinh ra SAU khi chạy `next dev`/`next build`
+  lần đầu cho route đó; viết tay tránh phụ thuộc thứ tự chạy lệnh, chắc
+  chắn đúng ngay cả trước khi build lần đầu.
+- 1 trang chi tiết Source duy nhất (`/sources/:id`) gộp cả 5 action
+  (verify/discover/select/run/history) thay vì tách nhiều trang con — vì
+  các action này phụ thuộc lẫn nhau theo đúng thứ tự luồng đề bài
+  (discover → select cần state discover vẫn còn trên cùng 1 trang), tách
+  trang sẽ phải truyền state qua URL/localStorage không cần thiết.
+- Không tạo trang `/sources/new` riêng — form "Register" nằm ngay trên
+  `/sources` (list + form cùng 1 trang) — đơn giản hơn, đúng tinh thần
+  "KHÔNG polish thừa" của đề bài, danh sách source thường ít (fixture/dev
+  scale), không cần trang riêng.
+- `MQTT` bị loại khỏi `type` mà form "Register" cho chọn (chỉ
+  `API`/`DATABASE`/`CRAWLER`) — dù `SourceType` Prisma enum cho phép, tạo
+  1 Source `MQTT` qua UI sẽ không có action nào (verify/discover/select/
+  collect) thực sự dùng được, chỉ gây nhầm lẫn.
+- Provenance table ở `/canonical-events` có link ngược `sourceId` →
+  `/sources/:id` và link `collectionRunId` → lọc lại
+  `/canonical-events?collectionRunId=` — tận dụng đúng field đã có sẵn
+  trong response Step 10, không cần thêm endpoint mới nào.
+
+**Verify OFFLINE (frontend, không cần Docker):**
+- `npx tsc --noEmit` sạch (không output, exit 0).
+- `npx eslint` sạch (không output, exit 0) — sau khi sửa
+  `react-hooks/set-state-in-effect` ở cả 3 trang mới.
+- `npm run build` thành công, dán nguyên output:
+  ```
+  > frontend@0.1.0 build
+  > next build
+
+  ▲ Next.js 16.3.4 (Turbopack)
+  ✓ Running next.config.ts took 129ms
+
+    Creating an optimized production build ...
+  ✓ Compiled successfully in 4.5s
+    Running TypeScript ...
+    Finished TypeScript in 1890ms ...
+    Collecting page data using 8 workers ...
+    Generating static pages using 8 workers (0/6) ...
+  ✓ Generating static pages using 8 workers (6/6) in 702ms
+    Finalizing page optimization ...
+
+  Route (app)
+  ┌ ○ /
+  ├ ○ /_not-found
+  ├ ƒ /canonical-events
+  ├ ○ /sources
+  └ ƒ /sources/[id]
+
+  ○  (Static)   prerendered as static content
+  ƒ  (Dynamic)  server-rendered on demand
+  ```
+  Đọc đúng: đủ 3 route mới (`/canonical-events`, `/sources`,
+  `/sources/[id]`) build thành công. `/canonical-events` và
+  `/sources/[id]` là **ƒ Dynamic** (đúng kỳ vọng — phụ thuộc
+  `searchParams`/route param tại request time); `/sources` là **○
+  Static** (shell tĩnh, fetch dữ liệu hoàn toàn phía client sau khi
+  trang tải, giống `/` có sẵn từ Step 1).
+- **CHƯA click-test bằng mắt trên trình duyệt thật** — máy này không có
+  Docker để `docker compose up` + mở `http://localhost:3000` thật. Phần B
+  (Definition of Done) để lại cho máy có Docker.
+
 ## Việc cần làm ở máy có Docker
 
 Checklist thủ công — làm ở máy laptop có Docker chạy được, sau khi pull code
@@ -2194,3 +2400,15 @@ mới nhất:
       `contributingCollectionRunIds`, UUID thật, không placeholder) và
       2 lần gọi cách nhau ~32 phút chứng minh `freshnessMinutes` tính
       động, không phải giá trị cứng.
+- [ ] **Step 11 — chưa click-test, cần máy có Docker.** Frontend Data
+      Sources UI (`app/sources/`, `app/sources/[id]/`,
+      `app/canonical-events/`) đã build sạch offline (`tsc --noEmit`/
+      `eslint`/`npm run build`, xem entry "Step 11" bên trên) nhưng CHƯA
+      tự click qua bằng mắt trên trình duyệt thật. `docker compose up -d
+      --build`, mở `http://localhost:3000/sources`, tự test tay ít nhất
+      1 lần đủ luồng register → verify → discover → select → run
+      collection → xem lịch sử → preview provenance cho MỖI loại source
+      (API, DATABASE, CRAWLER — CRAWLER bỏ qua bước Select vì không có).
+      Sau khi test tay xong: sửa lại đúng entry "Step 11" (đổi trạng thái
+      "CHƯA click-test" → xác nhận đã tự test tay thật + ghi rõ kết quả/
+      bug nếu có), rồi mới đề xuất commit message thứ 2 cho phần verify.

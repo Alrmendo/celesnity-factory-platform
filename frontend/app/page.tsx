@@ -1,5 +1,6 @@
 'use client';
 
+import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import styles from './page.module.css';
 
@@ -59,6 +60,10 @@ export default function Home() {
           Could not reach backend: {health.message}
         </p>
       )}
+
+      <p>
+        <Link href="/sources">Data Sources →</Link>
+      </p>
     </main>
   );
 }
