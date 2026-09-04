@@ -56,6 +56,37 @@ lập bằng `docker compose up` như trên máy local bình thường.
   trong 1 lần gọi thay vì `GET /lines/:id/status` theo từng line — cả hai
   đều là thiết kế tự đặt ra, prompt cho phép "hoặc endpoint tương đương".
   Xem entry "Step 10" trong Nhật ký triển khai bên dưới.
+- "Cùng station" khi tra `ACK_EXCEPTION` có acknowledge 1 conflict hay
+  chưa (mô tả nhiệm vụ Step 5) được suy giảm thành "cùng batch, timestamp
+  của `ACK_EXCEPTION` sau `updated_at` của canonical_event đó" — schema
+  thật của `management_events` (Step 2) không có cột station nào để so
+  khớp trực tiếp. Trong phạm vi các scenario hiện có, mỗi batch tối đa 1
+  conflict sống tại 1 thời điểm nên 2 cách diễn giải cho kết quả giống
+  hệt nhau; đây là thiết kế tự đặt ra khi câu chữ đề bài không khớp 1:1
+  với cấu trúc bảng đã chốt từ Step 2. Xem entry "Step 5" trong Nhật ký
+  triển khai bên dưới.
+- Retry (Step 6, Application API) KHÔNG áp dụng cho lỗi 401 (sai/thiếu
+  API key) — chỉ retry lỗi tạm thời (5xx/timeout/network). `docs/plan-v4.md`
+  chỉ nói "có retry", không nói retry mọi loại lỗi; loại trừ 401 là thiết
+  kế tự đặt ra (sai key không tự khỏi bằng cách gọi lại). Xem entry
+  "Step 6" trong Nhật ký triển khai bên dưới.
+- Khi crawler (Step 8) phát hiện pagination loop, collection run kết
+  thúc **FAILED** và **KHÔNG ingest** bất kỳ dòng nào đã crawl được
+  trong lần chạy đó (khác cách xử lý malformed row — vẫn ingest các dòng
+  hợp lệ còn lại) — đề bài chỉ yêu cầu "prevent pagination loops", không
+  quy định cụ thể collection run phải kết thúc SUCCESS hay FAILED khi
+  loop bị phát hiện; đây là thiết kế tự đặt ra, nhất quán với bất biến
+  "run FAILED = không ingest" đã áp dụng cho mọi collector khác trong
+  repo. Xem entry "Step 8 — HOÀN TẤT, verify thật trên Docker thật"
+  trong Nhật ký triển khai bên dưới.
+- `actor` của mỗi management event (Step 9) bắt buộc lấy từ request body
+  của caller, KHÔNG dùng 1 hằng số seeded cố định giống `organizationId`
+  — dù đề bài cho phép "seeded... actor" như 1 lựa chọn. "Actor nào đang
+  thao tác" là thông tin thật sự khác nhau giữa các lần gọi (2 manager
+  khác nhau block/resume/ack cùng 1 batch), cố định cứng sẽ làm audit
+  log mất ý nghĩa phân biệt "ai đã làm gì"; đây là thiết kế tự đặt ra,
+  chọn 1 trong các lựa chọn đề bài cho phép. Xem entry "Step 9" trong
+  Nhật ký triển khai bên dưới.
 
 ## Trạng thái hiện tại
 
