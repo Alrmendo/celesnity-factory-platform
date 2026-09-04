@@ -126,13 +126,27 @@ không lặp lại ở đây.
   dụng nguyên `ProductionDomainService.getBatchStatus`, không viết lại
   logic domain). `STALE_THRESHOLD_MINUTES` (env var, default 15) giờ
   configurable. Chỉ backend — chưa có code frontend.
-- Step 11 (frontend, **build sạch — CHƯA tự click-test trên trình duyệt
-  thật**, máy này không có Docker; xem entry "Step 11" bên dưới): Data
-  Sources view (`frontend/app/sources/`, `frontend/app/canonical-events/`)
-  — register/verify/discover/select/run collection/lịch sử/preview
-  provenance, gọi thẳng các endpoint Step 6–10 qua `lib/api.ts`.
-- **Chưa làm**: Production Lines view (Step 12) — bước tiếp theo sau
-  Step 11.
+- Step 11 (frontend, code + 3 fix sau khi test tay UI thật — xem entry
+  "Step 11" và "Step 11 — bổ sung..." bên dưới): Data Sources view
+  (`frontend/app/sources/`, `frontend/app/canonical-events/`) —
+  register/verify/discover/select/run collection/lịch sử/preview
+  provenance, gọi thẳng các endpoint Step 6–10 qua `lib/api.ts`. Đã tự
+  test tay 1 lần trên Docker, tìm ra + sửa 3 bug thật (seed CRAWLER sai/
+  leak test data, "Internal server error" che lỗi thật, thiếu xác nhận
+  Select) — build sạch offline, **CHƯA re-test lại 3 fix qua trình duyệt
+  thật**.
+- Step 12 (frontend, **build sạch — CHƯA tự click-test trên trình duyệt
+  thật**, máy này không có Docker; xem entry "Step 12" bên dưới):
+  Production Lines view (`frontend/app/production-lines/`) — rollup theo
+  line/station/batch (progress, WIP, freshness, exceptions, provenance)
+  + 4 management action (Block/Resume/Acknowledge exception/Add note)
+  gọi thẳng `POST /management-events/*` (Step 9), tái sử dụng trang
+  preview `/canonical-events` (Step 11) cho provenance thay vì dựng lại
+  UI riêng. **Đây là view UI cuối cùng trong checklist đề bài gốc — cả 2
+  màn Data Sources + Production Lines đã có code.**
+- **Chưa làm**: click-test bằng mắt trên trình duyệt thật cho cả Step
+  11 (3 fix) và Step 12 — máy này không có Docker, để lại cho máy có
+  Docker (xem checklist "Việc cần làm ở máy có Docker" bên dưới).
 
 Backend là modular monolith NestJS, 5 module nghiệp vụ:
 
@@ -2481,6 +2495,280 @@ Docker (theo mục checklist Step 11 bên dưới), đặc biệt xác nhận: S
 thật; message lỗi thật hiện đúng khi thiếu env var/selectedTable (không
 còn "Internal server error"); dòng xanh xác nhận hiện sau khi Select.
 
+### Step 11 — điều tra regression `test:e2e` (8 test FAILED) — 2026-09-04
+
+**Trạng thái: đã điều tra xong bằng cách đọc code thật (không đoán) —
+KẾT LUẬN: KHÔNG PHẢI do 2 thay đổi vừa rồi (`truncateAll` trong `afterAll`
++ đổi `throw new Error` → `BadRequestException`). Nguyên nhân thật là 1
+vấn đề môi trường Jest/Node có sẵn từ trước, không liên quan gì đến code
+đã sửa. KHÔNG có code nào bị sửa ở lượt này — chỉ điều tra + ghi lại, vì
+máy này không có Docker để tự verify bất kỳ fix nào cho vấn đề #3.**
+
+**Bối cảnh:** commit `f04238f` ("stop leaking ephemeral test sources...")
+— đúng 7 file, xác nhận qua `git show --stat f04238f`: `README.md`,
+`backend/prisma/seed.ts`, `backend/src/modules/collection-runs/
+collection-runs.service.ts`, `backend/src/modules/sources/
+sources.service.ts`, `backend/test/collection-runs.e2e-spec.ts`,
+`backend/test/crawler-collector.e2e-spec.ts`,
+`frontend/app/sources/[id]/page.tsx` — chạy `test:e2e` sau đó FAIL 8/59,
+đúng 2 file `*.e2e-spec.ts` vừa sửa.
+
+**Nghi vấn 1 — validation env var áp dụng nhầm cho CRAWLER: XÁC NHẬN
+SAI.** Đọc lại `sources.service.ts`: `verifyConnection`/`discoverSchema`
+branch `if (source.type === 'CRAWLER')` **NGAY ĐẦU HÀM**, gọi
+`resolveCrawlerConfig` — hàm này (dòng 210-217) chỉ check
+`source.type !== 'CRAWLER'`, KHÔNG hề đọc `passwordEnvVar`/
+`apiKeyEnvVar` nào cả (đúng comment sẵn có: "CRAWLER sources carry no
+secret... nothing to resolve from env"). `resolveDatabaseConfig` (nơi có
+`BadRequestException` mới thêm cho `passwordEnvVar`) chỉ được gọi ở
+nhánh KHÔNG PHẢI CRAWLER. Tương tự `collection-runs.service.ts`'s
+`runCrawlerCollection` gọi thẳng `crawlDeliveries(connectionConfig.baseUrl,
+...)`, không đụng `apiKeyEnvVar`/`passwordEnvVar` ở đâu cả. Với
+`collection-runs.e2e-spec.ts` (source type API): `createFixtureSource()`
+luôn set `apiKeyEnvVar` đúng + `beforeAll` đã
+`process.env[FIXTURE_API_KEY_ENV_VAR] = RUN_TEST_API_KEY` trước khi test
+chạy — `apiKey` KHÔNG rỗng, nhánh `if (!apiKey) throw
+BadRequestException(...)` không bao giờ chạy tới trong các test này. Kết
+luận: **4 chỗ `BadRequestException` mới thêm ở Việc 2 lượt trước không
+hề nằm trên đường đi thực thi của bất kỳ test nào đang fail** — không
+phải nguyên nhân.
+
+**Nghi vấn 2 — `truncateAll` đặt sai vị trí hook: XÁC NHẬN SAI.** Đọc lại
+nguyên văn cả 2 file: `crawler-collector.e2e-spec.ts` dòng 71-83 và
+`collection-runs.e2e-spec.ts` — cả 2 đều đặt `await truncateAll(prisma)`
+làm dòng ĐẦU TIÊN bên trong `afterAll(async () => {...})` (không phải
+`afterEach`/`beforeEach` gõ nhầm), chạy TRƯỚC `app.close()` (đúng thứ tự
+cần, vì `PrismaService.onModuleDestroy` gọi `$disconnect()` khi
+`app.close()`). `afterAll` chỉ chạy đúng 1 lần, SAU khi toàn bộ test
+trong `describe` block của CHÍNH file đó đã chạy xong — với
+`jest-e2e.json`'s `maxWorkers: 1` (chạy file tuần tự, không song song),
+`afterAll` của 1 file không thể nào chạy XEN GIỮA lúc file khác đang thực
+thi một `fetch()` nào đó. Không có cơ chế nào để hook này ảnh hưởng chéo
+sang file khác hoặc sang 1 request đang bay giữa chừng.
+
+**Nghi vấn 3 — "fetch is not defined" là message thật hay bị gán nhầm
+từ 1 lỗi khác: XÁC NHẬN LÀ MESSAGE THẬT, KHÔNG PHẢI NHẦM LẪN — nhưng
+KHÔNG PHẢI hệ quả của nghi vấn 1.** Đọc `supplier-crawler-client.ts`'s
+`fetchPage` (dòng 66-92): catch block chỉ có 3 nhánh — rethrow nếu đã là
+`SupplierCrawlerError`, đổi thành message "timed out" nếu là
+`AbortError`, còn lại thì bọc `err.message` NGUYÊN VĂN vào
+`"supplier portal request failed: ${err.message}"`. Để ra đúng chuỗi
+`"supplier portal request failed: fetch is not defined"`, `err.message`
+ở dòng `const response = await fetch(pageUrl, {...})` (dòng 70) phải
+CHÍNH XÁC là `"fetch is not defined"` — đây là text `ReferenceError` gốc
+của V8/Node khi tham chiếu 1 identifier chưa từng tồn tại trong scope,
+không phải chuỗi tự chế từ đâu khác. **Không có catch-all nào ở đây gán
+nhầm message** — `fetch` thật sự không tồn tại trong global scope tại
+thời điểm gọi. Vì mọi test PASS (database-collector, management-events,
+batch-lifecycle, read-api, app) đều KHÔNG hề gọi `fetch()` ở đâu cả (dùng
+driver `pg` hoặc supertest chạm thẳng HTTP server nội bộ của Nest, không
+qua global `fetch`), còn TOÀN BỘ 8 test FAIL đều đi qua
+`fixture-api-client.ts`/`supplier-crawler-client.ts` (2 file DUY NHẤT
+gọi `fetch()` global, không import) — bằng chứng khớp 100%: vấn đề là
+`globalThis.fetch` không có mặt trong môi trường Jest lúc chạy suite
+này, không liên quan gì tới nghi vấn 1 (đã bác bỏ ở trên bằng code, hai
+việc độc lập hoàn toàn).
+- Đây KHÔNG phải lần đầu gặp đúng loại lỗi này — `fixture-api-client.ts`
+  dòng 6-30 (comment đầu file, viết từ Step 6) đã kể lại nguyên văn 1 lần
+  "fetch is not defined" TRƯỚC ĐÂY, quy kết cho "image Docker cũ" — nhưng
+  chính comment đó cũng thừa nhận chưa chắc chắn 100% ("nhiều khả năng
+  CŨNG là do image cũ", README gốc). Lần này bối cảnh khác hẳn: chạy
+  `test:e2e` trực tiếp qua `ts-jest` trên mã nguồn TypeScript, KHÔNG qua
+  Docker image nào (`node dist/main.js`) — giả thuyết "image cũ" của Step
+  6 KHÔNG THỂ áp dụng cho lần này. Điều này gợi ý mạnh nguyên nhân GỐC
+  thật sự chưa bao giờ là "image cũ" mà là 1 vấn đề riêng của
+  `jest-environment-node` (Jest 29, xem `jest-e2e.json`'s
+  `"testEnvironment": "node"`) không luôn forward global `fetch` của
+  Node vào sandbox/VM context riêng của mỗi file test — đây là hạn chế
+  đã biết, phụ thuộc version Jest/Node, không nhất quán giữa các lần
+  chạy. Không có gì trong `jest-e2e.json`/`package.json` bị đổi ở commit
+  `f04238f` (đã xác nhận qua `git show --stat`, 2 file này KHÔNG nằm
+  trong danh sách 7 file thay đổi) nên đây không phải do cấu hình Jest bị
+  sửa.
+
+**Vì sao không sửa ở lượt này:** máy đang sửa lỗi (máy này) không có
+Docker/Postgres — không thể tự chạy `test:e2e` để verify bất kỳ thay đổi
+nào cho vấn đề môi trường này. Lần trước đã có 1 bài học đắt giá đúng
+loại lỗi này (README Step 6: `import { fetch } from 'undici'` — npm
+package độc lập — tưởng sửa được nhưng lại gây crash MỚI, tệ hơn, ở 2/3
+suite khác). Sửa mù lần nữa mà không verify được là đúng thứ đề bài này
+dặn KHÔNG làm.
+
+**Đề xuất hướng sửa (CHƯA áp dụng, cần verify trên máy có Docker
+trước):**
+1. Trước hết, chạy lại `npm run test:e2e` một lần nữa, KHÔNG sửa gì —
+   nếu 8 test này pass trở lại mà không đổi code, xác nhận đây là lỗi
+   **flaky theo lần chạy** (đúng giả thuyết môi trường ở trên), không
+   phải lỗi tất định.
+2. Nếu fail lại nhất quán: thử `import { fetch } from 'node:undici';`
+   (module NỘI BỘ của Node, KHÔNG PHẢI package npm `undici` độc lập đã
+   gây crash ở Step 6 — đây chính là implementation Node dùng để cấp
+   global `fetch`, không phải 1 bản cài riêng cạnh tranh, nên nhiều khả
+   năng tránh được đúng lỗi `webidl.util.markAsUncloneable` đã gặp trước
+   đó) thay cho global `fetch` trần trong `fixture-api-client.ts` và
+   `supplier-crawler-client.ts`. Chưa áp dụng thay đổi này vào code —
+   chỉ ghi lại làm gợi ý, vì không verify được ở máy này.
+
+**Verify OFFLINE (không có thay đổi code nào ở lượt này, chỉ để xác nhận
+repo vẫn sạch sau khi điều tra):**
+- `npx tsc --noEmit` (backend) sạch.
+- `npm run lint` (backend) sạch.
+- `npm run test` (backend, unit, không cần DB): vẫn 22/22 pass.
+
+### Step 12 — Production Lines UI — 2026-09-04
+
+**Trạng thái: build sạch (`tsc --noEmit`/`eslint`/`npm run build` đều
+sạch) — CHƯA tự click-test bằng mắt trên trình duyệt thật (máy này không
+có Docker). Chỉ làm frontend — không sửa code backend nào. Đây là view UI
+cuối cùng còn thiếu theo checklist đề bài gốc.**
+
+**Audit trước khi code:** đọc lại `frontend/app/sources/[id]/page.tsx`
+(Step 11) để giữ đúng 3 quy ước đã có: `frontend/lib/api.ts` là nơi DUY
+NHẤT định nghĩa type + hàm gọi API; state tách `LoadState<T>` (không có
+`idle`, dùng cho dữ liệu fetch lúc mount) khỏi `Action<T>` (có `idle`,
+dùng cho action do người dùng bấm); mỗi state fetch-lúc-mount tách cặp
+`fetchX`/`refreshX` để không vi phạm `react-hooks/set-state-in-effect`
+(fetchX không setState đồng bộ, dùng cho `useEffect`; refreshX set
+loading rồi gọi fetchX, dùng sau khi mutate).
+
+**Đã làm:**
+- `frontend/lib/api.ts` — thêm 2 nhóm type + hàm mới, đọc TRỰC TIẾP từ
+  code backend (không đoán theo README, vì README's Step 10 entry không
+  liệt kê lại đầy đủ `BatchStatusResult`'s field — đọc thẳng
+  `backend/src/modules/production-domain/production-lines.controller.ts`'s
+  `BatchLineView` và `backend/src/modules/management-events/types.ts`):
+  - `Station`/`BatchState`/`FreshnessStatus`/`QualityIndicator`/
+    `ProductionLineBatch`/`ProductionLineStation`/`ProductionLine`/
+    `listProductionLines()` — mirror đúng field `BatchLineView` (spread
+    `BatchStatusResult` + `workOrderId`/`lastEventAt`/
+    `contributingSourceRecordIds`/`contributingCollectionRunIds`) và
+    `{lineId, stations, batches}` của `GET /production-lines`.
+  - `ManagementEvent`/`blockBatch`/`resumeBatch`/`ackException`/
+    `addNote` — body đúng `ManagementActionDto`
+    (`{batchId, actor, note?}`) cho block/resume/ack-exception,
+    `AddNoteDto` (`{batchId, actor, note}`, `note` bắt buộc) cho note;
+    response là row `managementEvent` thật (service trả thẳng kết quả
+    `prisma.managementEvent.create()`, không serialize lại — xác nhận
+    qua đọc `management-events.service.ts`).
+- `app/production-lines/page.tsx` (mới) — mục 1+2+3 checklist:
+  - Theo từng line: bảng `station × wip × batchIds` (dùng đúng
+    `stations[]` đã có, không tính lại WIP ở frontend).
+  - Theo từng batch, 1 "card" (không phải hàng bảng — quá nhiều field +
+    4 nút hành động để nhét vừa 1 ô bảng dễ đọc): `workOrderId`,
+    `batchId`, `state` (màu đỏ khi `BLOCKED`, xanh khi `COMPLETED`),
+    `currentStation`, `completedQuantity`, `missingStations` (hiển thị
+    "Thiếu dữ liệu tại: ..." khi không rỗng), `freshnessStatus` +
+    `freshnessMinutes` + `lastEventAt` (cả 2 cùng hiển thị, đúng yêu cầu
+    "mức độ cũ" lẫn "cập nhật lúc"), `qualityIndicators` (liệt kê rõ
+    từng `code` + đã/chưa acknowledge, chỉ hiện khi không rỗng — đây
+    cũng là điều kiện hiện nút "Acknowledge exception").
+  - `contributingSourceRecordIds`/`contributingCollectionRunIds`: hiển
+    thị SỐ LƯỢNG + 1 link `/canonical-events?batchId=<batchId>` (trang
+    preview có sẵn từ Step 11) — KHÔNG tự dựng lại UI provenance chi
+    tiết ở đây, đúng chỉ dẫn "tái sử dụng trang đã có".
+  - 4 nút action (Block/Resume/Acknowledge exception/Add note) — dùng
+    chung 1 ô input `actor` (text) cho cả 4 action của batch đó, thêm
+    riêng 1 ô input `note` cho Add note. Mỗi action có state
+    `Action<ManagementEvent>` riêng, disable nút khi đang loading hoặc
+    thiếu input bắt buộc (`actor` rỗng cho cả 4; `note` rỗng thêm cho
+    riêng Add note). Nút "Acknowledge exception" CHỈ hiện khi
+    `qualityIndicators.length > 0` — đúng chỉ dẫn, và khớp với
+    validation backend (`ackException` 400 nếu batch không có
+    CONFLICT, Step 9).
+  - Sau MỌI action thành công: gọi `onActionSuccess()` (=
+    `refreshLines`, tái sử dụng đúng pattern refreshX) để tự động load
+    lại toàn bộ `GET /production-lines` — dòng xanh xác nhận
+    (`"<Action> thành công lúc <timestamp>"`, lấy từ
+    `ManagementEvent.timestamp` — thời điểm SERVER ghi nhận, không phải
+    giờ trình duyệt) vẫn hiển thị bên dưới nút sau khi refresh vì state
+    action nằm trong `BatchCard`, không bị reset bởi việc `ProductionLinesPage`
+    re-render danh sách batch (React giữ nguyên state cục bộ của
+    component con theo `key={batch.batchId}` không đổi).
+  - Lỗi (400 "not currently blocked", 400 "no CONFLICT canonical event",
+    lỗi mạng...) hiển thị đúng message thật ngay dưới nút tương ứng —
+    tái sử dụng nguyên `apiFetch`'s error parsing đã sửa xong ở Step 11
+    "bổ sung" (không hiện "Internal server error" nữa cho lỗi nghiệp
+    vụ).
+- `app/page.tsx`: thêm 1 link `Production Lines →` sang
+  `/production-lines`, ngay dưới link `Data Sources →` đã có từ Step 11.
+
+**Vấn đề gặp phải:**
+- Viết nhầm `useState(() => { fetchLines(); })` thay vì `useEffect` lúc
+  code (định thử "tối ưu" gọi fetch ngay trong lazy initializer của
+  `useState` để né rule `react-hooks/set-state-in-effect`) — tự phát
+  hiện lại khi đọc lại code trước khi chạy `tsc`: gọi side-effect
+  (fetch, rồi `.then`/`.catch` gọi `setLines`) bên trong phần khởi tạo
+  state là vi phạm quy tắc "render phải pure" của React, và React 19
+  Strict Mode cố tình gọi lại initializer 2 lần để phát hiện đúng loại
+  lỗi này — sẽ gây fetch 2 lần dư thừa mỗi lần mount. Sửa lại đúng
+  `useEffect(fetchLines, [])`, giống hệt pattern `app/sources/page.tsx`/
+  `app/sources/[id]/page.tsx` đã dùng — không có lỗi thật nào lọt vào
+  code cuối cùng (bắt được TRƯỚC khi chạy `tsc`/`eslint`), nhưng đáng
+  ghi lại vì suýt lặp lại đúng nhóm lỗi `set-state`-ở-sai-chỗ đã gặp ở
+  Step 11.
+
+**Quyết định phát sinh:**
+- Card-per-batch (không phải table-row-per-batch) cho phần chi tiết
+  batch — bảng chỉ dùng cho "station × wip × batchIds" (dữ liệu đơn
+  giản, đúng "table đơn giản là đủ"); phần chi tiết batch có quá nhiều
+  field + 4 nút hành động + 2 ô input, nhét vào 1 hàng bảng sẽ khó đọc
+  hơn hẳn, và đề bài chỉ nói "hiển thị" cho phần này, không bắt buộc
+  dạng bảng.
+- 1 ô input `actor` DÙNG CHUNG cho cả 4 action trong cùng 1 batch (thay
+  vì 4 ô riêng) — hợp lý vì cùng 1 người quản lý thường thao tác nhiều
+  hành động liên tiếp trên cùng 1 batch trong 1 phiên làm việc; giảm
+  số ô nhập, đúng tinh thần "KHÔNG polish/phức tạp thừa".
+- Không thêm ô input riêng cho `note` ở Block/Resume/Acknowledge
+  exception (dù `ManagementActionDto.note` cho phép optional) — chỉ
+  "Add note" mới có ô nhập nội dung, đúng đúng 4 action liệt kê trong
+  checklist ("Block, Resume, Acknowledge, Add a note" — note gắn liền
+  với action thứ 4, không phải field chung của mọi action) và giữ UI
+  tối giản nhất có thể trong thời gian còn lại.
+- KHÔNG thêm UI cho `STALE_THRESHOLD_MINUTES` — đã configurable qua env
+  var ở backend (Step 10), không có yêu cầu nào cần chỉnh nó từ UI.
+
+**Verify OFFLINE (frontend, không cần Docker):**
+- `npx tsc --noEmit` sạch (không output, exit 0).
+- `npx eslint` sạch (không output, exit 0).
+- `npm run build` thành công, dán nguyên output:
+  ```
+  > frontend@0.1.0 build
+  > next build
+
+  ▲ Next.js 16.3.4 (Turbopack)
+  ✓ Running next.config.ts took 26ms
+
+    Creating an optimized production build ...
+  ✓ Compiled successfully in 846ms
+    Running TypeScript ...
+    Finished TypeScript in 2.1s ...
+    Collecting page data using 9 workers ...
+    Generating static pages using 9 workers (0/7) ...
+  ✓ Generating static pages using 9 workers (7/7) in 775ms
+    Finalizing page optimization ...
+
+  Route (app)
+  ┌ ○ /
+  ├ ○ /_not-found
+  ├ ƒ /canonical-events
+  ├ ○ /production-lines
+  ├ ○ /sources
+  └ ƒ /sources/[id]
+
+  ○  (Static)   prerendered as static content
+  ƒ  (Dynamic)  server-rendered on demand
+  ```
+  Đọc đúng: `/production-lines` build thành công, **○ Static** (đúng kỳ
+  vọng — không phụ thuộc route param/searchParams nào, giống `/sources`,
+  toàn bộ dữ liệu fetch phía client sau khi trang tải). 2 route
+  `[id]`/`canonical-events` vẫn Dynamic như cũ, không đổi.
+- **CHƯA click-test bằng mắt trên trình duyệt thật** — máy này không có
+  Docker để `docker compose up` + mở
+  `http://localhost:3000/production-lines` thật. Phần B (Definition of
+  Done) để lại cho máy có Docker: xem đúng dữ liệu B002 đã biết trước,
+  thử Block → Resume 1 batch, thử Add note, và (chạy B006 qua Data
+  Sources trước để tạo exception CONFLICT) thử Acknowledge exception.
+
 ## Việc cần làm ở máy có Docker
 
 Checklist thủ công — làm ở máy laptop có Docker chạy được, sau khi pull code
@@ -2580,4 +2868,20 @@ mới nhất:
       không còn "Internal server error"; bấm Select → thấy dòng xanh xác
       nhận. Sau khi re-test xong: sửa lại đúng entry "Step 11 — bổ sung..."
       (đổi trạng thái + dán bằng chứng thật), rồi mới đề xuất commit
+      message thứ 2 cho phần verify.
+- [ ] **Step 12 — chưa click-test, cần máy có Docker.** Frontend
+      Production Lines UI (`app/production-lines/page.tsx`) đã build
+      sạch offline (`tsc --noEmit`/`eslint`/`npm run build`, xem entry
+      "Step 12" bên trên) nhưng CHƯA tự click qua bằng mắt trên trình
+      duyệt thật. `docker compose up -d --build`, mở
+      `http://localhost:3000/production-lines`, tự test tay ít nhất 1
+      lần: xem đúng dữ liệu B002 (đã biết trước từ các lần test/seed —
+      `IN_PROGRESS`, `currentStation: RECEIVING`); thử Block → Resume 1
+      batch (nhập `actor`, xem dòng xanh + số liệu tự refresh); thử Add
+      note; nếu có batch đang CONFLICT (chạy collection B006 qua Data
+      Sources trước để tạo exception — xem README's B006 fixture ở Step
+      3/5) thử Acknowledge exception (nút chỉ hiện khi có
+      `qualityIndicators`). Sau khi test tay xong: sửa lại đúng entry
+      "Step 12" (đổi trạng thái "CHƯA click-test" → xác nhận đã tự test
+      tay thật + ghi rõ kết quả/bug nếu có), rồi mới đề xuất commit
       message thứ 2 cho phần verify.

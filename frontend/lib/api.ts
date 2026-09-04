@@ -202,3 +202,121 @@ export function listCanonicalEvents(filters: {
   const qs = params.toString();
   return apiFetch<CanonicalEvent[]>(`/canonical-events${qs ? `?${qs}` : ''}`);
 }
+
+// --- Production lines (Step 10) -------------------------------------------
+
+export type Station =
+  | 'RECEIVING'
+  | 'SORTING'
+  | 'WASHING'
+  | 'DRYING'
+  | 'FOLDING'
+  | 'DISPATCH';
+export type BatchState = 'PLANNED' | 'IN_PROGRESS' | 'BLOCKED' | 'COMPLETED';
+export type FreshnessStatus = 'NO_DATA' | 'OK' | 'STALE';
+
+export interface QualityIndicator {
+  code: string;
+  acknowledged: boolean;
+}
+
+// One entry of GET /production-lines's batches[] — BatchStatusResult
+// (backend/src/modules/production-domain/types.ts) plus the Step 10/Step
+// 11-bổ-sung additions (workOrderId, lastEventAt, contributing*Ids). See
+// backend/src/modules/production-domain/production-lines.controller.ts's
+// BatchLineView — this mirrors it field-for-field.
+export interface ProductionLineBatch {
+  batchId: string;
+  workOrderId: string;
+  state: BatchState;
+  currentStation: Station | null;
+  completedQuantity: number | null;
+  missingStations: Station[];
+  freshnessStatus: FreshnessStatus;
+  freshnessMinutes: number | null;
+  qualityIndicators: QualityIndicator[];
+  lastEventAt: string | null;
+  contributingSourceRecordIds: string[];
+  contributingCollectionRunIds: string[];
+}
+
+export interface ProductionLineStation {
+  station: Station;
+  wip: number;
+  batchIds: string[];
+}
+
+export interface ProductionLine {
+  lineId: string;
+  stations: ProductionLineStation[];
+  batches: ProductionLineBatch[];
+}
+
+export function listProductionLines(): Promise<ProductionLine[]> {
+  return apiFetch<ProductionLine[]>('/production-lines');
+}
+
+// --- Management events (Step 9) --------------------------------------------
+
+export type ManagementAction = 'BLOCK' | 'RESUME' | 'ACK_EXCEPTION' | 'ADD_NOTE';
+
+// Response shape of all 4 POST /management-events/* endpoints — the raw
+// created row (ManagementEventsService.create returns
+// prisma.managementEvent.create(...) directly, no extra serialization).
+export interface ManagementEvent {
+  id: string;
+  organizationId: string;
+  batchId: string;
+  actor: string;
+  action: ManagementAction;
+  timestamp: string;
+  note: string | null;
+}
+
+// `actor` required on every action (backend/src/modules/management-events/
+// types.ts's ManagementActionDto/AddNoteDto — no seeded default, always
+// from the caller). `note` optional for block/resume/ack-exception,
+// required (enforced backend-side, non-empty) for addNote.
+export function blockBatch(
+  batchId: string,
+  actor: string,
+  note?: string,
+): Promise<ManagementEvent> {
+  return apiFetch<ManagementEvent>('/management-events/block', {
+    method: 'POST',
+    body: JSON.stringify({ batchId, actor, note }),
+  });
+}
+
+export function resumeBatch(
+  batchId: string,
+  actor: string,
+  note?: string,
+): Promise<ManagementEvent> {
+  return apiFetch<ManagementEvent>('/management-events/resume', {
+    method: 'POST',
+    body: JSON.stringify({ batchId, actor, note }),
+  });
+}
+
+export function ackException(
+  batchId: string,
+  actor: string,
+  note?: string,
+): Promise<ManagementEvent> {
+  return apiFetch<ManagementEvent>('/management-events/ack-exception', {
+    method: 'POST',
+    body: JSON.stringify({ batchId, actor, note }),
+  });
+}
+
+export function addNote(
+  batchId: string,
+  actor: string,
+  note: string,
+): Promise<ManagementEvent> {
+  return apiFetch<ManagementEvent>('/management-events/note', {
+    method: 'POST',
+    body: JSON.stringify({ batchId, actor, note }),
+  });
+}

@@ -64,6 +64,9 @@ export default function Home() {
       <p>
         <Link href="/sources">Data Sources →</Link>
       </p>
+      <p>
+        <Link href="/production-lines">Production Lines →</Link>
+      </p>
     </main>
   );
 }
