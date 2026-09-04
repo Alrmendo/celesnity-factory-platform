@@ -21,6 +21,7 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+    command: sh -c "npx prisma migrate deploy && node dist/main.js"
     container_name: celesnity-backend
     restart: unless-stopped
     environment:
