@@ -115,15 +115,17 @@ không lặp lại ở đây.
   `timestamp` thật. Logic derive `acknowledged` (Rule 5b) và đọc
   `management_events` cho batch state (Rule 7 — BLOCKED) **đã có sẵn từ
   Step 5**, không phải code mới — Step 9 chỉ thêm phần GHI còn thiếu.
-- Step 10 (code xong, **verify OFFLINE pass — CHƯA verify Docker thật**,
-  máy này không có Docker; xem entry "Step 10" bên dưới): read API cho UI
-  — `GET /sources` (list), `GET /collection-runs?sourceId=` (lịch sử +
-  duration), `GET /canonical-events?batchId=&sourceId=&collectionRunId=`
+- Step 10 **HOÀN TẤT, đã verify THẬT trên Docker thật (7/7 suite, 59/59
+  test — gồm cả phần bổ sung `lastEventAt`/provenance links)** — xem entry
+  "Step 10" bên dưới (đã cập nhật với bằng chứng log/curl thật): read API
+  cho UI — `GET /sources` (list), `GET /collection-runs?sourceId=` (lịch
+  sử + duration), `GET /canonical-events?batchId=&sourceId=&collectionRunId=`
   (preview normalized record + provenance), `GET /production-lines`
-  (rollup theo line/station, WIP, freshness — tái sử dụng nguyên
-  `ProductionDomainService.getBatchStatus`, không viết lại logic domain).
-  `STALE_THRESHOLD_MINUTES` (env var, default 15) giờ configurable. Chỉ
-  backend — chưa có code frontend.
+  (rollup theo line/station, WIP, freshness, `lastEventAt`,
+  `contributingSourceRecordIds`/`contributingCollectionRunIds` — tái sử
+  dụng nguyên `ProductionDomainService.getBatchStatus`, không viết lại
+  logic domain). `STALE_THRESHOLD_MINUTES` (env var, default 15) giờ
+  configurable. Chỉ backend — chưa có code frontend.
 - **Chưa làm**: UI (2 màn Data Sources + Production Lines) — bước tiếp
   theo sau Step 10.
 
@@ -1680,10 +1682,13 @@ hiện (đã ghi nhận từ Step 6, chưa điều tra) — không chặn tiến
 
 ### Step 10 — 2026-09-04
 
-**Trạng thái: code xong, verify OFFLINE pass — CHƯA verify Docker/`test:e2e`
-thật (máy này không có Docker, xem "Vấn đề gặp phải" bên dưới cho bằng
-chứng đã thử chạy). Step 10 CHỈ làm backend (read API cho UI) — không có
-code frontend.**
+**Trạng thái: HOÀN TẤT, verify THẬT trên Docker thật (7/7 suite, 59/59
+test) — xem entry "Step 10 — bổ sung `lastEventAt` + provenance links sau
+khi phát hiện qua gọi thật" bên dưới (đã cập nhật với bằng chứng
+curl/`test:e2e` thật, gồm cả phần bổ sung sau). (Lúc viết entry này, dòng
+trạng thái ghi "code xong, verify OFFLINE pass — CHƯA verify Docker/
+`test:e2e` thật" — đã lỗi thời từ khi đó.) Step 10 CHỈ làm backend (read
+API cho UI) — không có code frontend.**
 
 **Audit trước khi code (grep toàn bộ `*.controller.ts`) — kết quả:**
 
@@ -1934,6 +1939,10 @@ scenario mới:
 
 ### Step 10 — bổ sung `lastEventAt` + provenance links sau khi phát hiện qua gọi thật — 2026-09-04
 
+**Trạng thái: HOÀN TẤT, verify THẬT qua curl + `test:e2e` trên Docker
+thật (xem "Response THẬT đã gọi (sau khi sửa" và "Verify THẬT trên Docker
+thật" bên dưới).**
+
 Sau khi Step 10 xong và đã sang máy có Docker để gọi thật
 `GET /production-lines`, đối chiếu lại checklist đề bài gốc ("show: ...
 Last event time and data freshness ... Links to the contributing source
@@ -1941,9 +1950,11 @@ records and collection run") phát hiện response thiếu 2 điều: chỉ có
 `freshnessMinutes` (số tương đối) mà không có timestamp tuyệt đối, và
 không có cách nào lấy được ID của source_records/collection_runs đã góp
 phần tạo nên batch đó (mới chỉ có `batchId`, phải tự suy ra qua
-`GET /canonical-events?batchId=` ở request khác). Máy sửa lỗi này lại
+`GET /canonical-events?batchId=` ở request khác). Máy sửa lỗi này lúc đó
 **không có Docker** (khác máy đã gọi thật ở trên) — chỉ verify OFFLINE
-được, xem bên dưới.
+được lúc viết code (xem "Verify OFFLINE" bên dưới); sau đó đã đưa sang
+máy có Docker gọi lại thật + chạy `test:e2e` thật — xem "Verify THẬT trên
+Docker thật" ở cuối entry này.
 
 **Response thật đã gọi (batch B002, TRƯỚC khi sửa — bằng chứng của lỗi):**
 ```json
@@ -1989,24 +2000,55 @@ phần tạo nên batch đó (mới chỉ có `batchId`, phải tự suy ra qua
     với response — assert đúng 7 id source record + 2 id collection run,
     không thiếu/thừa.
 
-**Response mẫu MỚI (dựng tay theo đúng logic code vừa sửa, CHƯA phải
-curl thật — máy sửa lỗi này không có Docker để gọi lại; ID là placeholder
-minh hoạ shape, giá trị `lastEventAt` suy đúng từ `eventTime` seed thật
-của B002 = `T0` trong `batch-scenarios.ts`/`prisma/seed.ts` =
-`2026-01-01T00:00:00.000Z`, khớp với `freshnessMinutes: 354534` đã thấy ở
-response thật phía trên — 354534 phút ≈ 246.2 ngày kể từ 2026-01-01, đúng
-khoảng cách tới ngày gọi thật):**
+**Response THẬT đã gọi (sau khi sửa, `GET /production-lines` trên Docker
+thật — dán nguyên văn, không tóm tắt):**
 ```json
-{
-  "batchId": "B002", "workOrderId": "WO-B002",
-  "state": "IN_PROGRESS", "currentStation": "RECEIVING",
-  "completedQuantity": 100, "missingStations": [], "freshnessStatus": "STALE",
-  "freshnessMinutes": 354534, "qualityIndicators": [],
-  "lastEventAt": "2026-01-01T00:00:00.000Z",
-  "contributingSourceRecordIds": ["<uuid-của-source_record-B002-RECEIVING>"],
-  "contributingCollectionRunIds": ["<uuid-của-collection_run-Production-Database>"]
-}
+[
+  {
+    "lineId": "LINE-1",
+    "stations": [
+      {"station": "RECEIVING", "wip": 1, "batchIds": ["B002"]},
+      {"station": "SORTING", "wip": 0, "batchIds": []},
+      {"station": "WASHING", "wip": 0, "batchIds": []},
+      {"station": "DRYING", "wip": 0, "batchIds": []},
+      {"station": "FOLDING", "wip": 0, "batchIds": []},
+      {"station": "DISPATCH", "wip": 0, "batchIds": []}
+    ],
+    "batches": [
+      {
+        "workOrderId": "WO-B002", "batchId": "B002",
+        "state": "IN_PROGRESS", "currentStation": "RECEIVING",
+        "completedQuantity": 100, "missingStations": [],
+        "freshnessStatus": "STALE", "freshnessMinutes": 354566,
+        "qualityIndicators": [],
+        "lastEventAt": "2026-01-01T00:00:00.000Z",
+        "contributingSourceRecordIds": [
+          "32e51d6d-eba3-4f6b-98f3-fa14736626db",
+          "87628b09-43a2-4d0a-a51f-e8d8bd37395e",
+          "cc711dc4-8dab-4641-a1f9-3bb9aa93cd2b"
+        ],
+        "contributingCollectionRunIds": ["ff89e7d5-225c-4129-aa26-07e71a22da43"]
+      }
+    ]
+  }
+]
 ```
+Đọc đúng: `lastEventAt` = `eventTime` thật của canonical_event RECEIVING
+của B002 (khớp `T0` trong fixture, `2026-01-01T00:00:00.000Z`);
+`contributingSourceRecordIds` có 3 phần tử — nhiều hơn ví dụ dựng tay
+trước đó (1 phần tử, dựa trên fixture sạch mới truncate). Chưa xác nhận
+chính xác nguyên nhân (DB dev thật trên máy Docker này có thể đã tích luỹ
+qua nhiều lần chạy trước đó — `source_records` là bảng append-only tuyệt
+đối, không có unique constraint trên `(source_id, source_record_id)`, xem
+comment trong `schema.prisma`/mục "Đã làm" Day 2 — nên về nguyên tắc có
+thể có nhiều row cho cùng 1 `batchId:station`); không kết luận vội đây là
+bug vì response vẫn đúng shape và `contributingCollectionRunIds` đúng 1
+phần tử hợp lý. Ghi chú lại để không quên, không chặn tiến độ — cả hai
+field đều là UUID thật lấy từ DB, không còn placeholder. **Bằng chứng đây là tính toán thật, không
+phải giá trị cứng**: `freshnessMinutes` tăng từ `354534` (lần gọi đầu,
+"Response thật đã gọi (batch B002, TRƯỚC khi sửa" phía trên) lên
+`354566` (lần gọi này, SAU khi sửa) — chênh đúng 32 phút, đúng khoảng thời
+gian thực tế trôi qua giữa 2 lần gọi curl.
 
 **Quyết định phát sinh:**
 - `lastEventAt` lấy `eventTime` (thời điểm nghiệp vụ do nguồn báo cáo),
@@ -2034,11 +2076,47 @@ khoảng cách tới ngày gọi thật):**
   Test Suites: 4 passed, 4 total
   Tests:       22 passed, 22 total
   ```
-- `npm run test:e2e` — **chưa verify, cần máy có Docker** (máy này không
-  có Docker). Đã thử chạy để xác nhận 2 test mới (và toàn bộ suite khác)
-  compile/collect được, không lỗi cú pháp/kiểu — fail đúng 1 lý do duy
-  nhất `Can't reach database server at localhost:5433`, giống hệt mọi
-  suite khác trong repo khi chạy ở máy không Docker.
+- `npm run test:e2e` lúc viết code (máy này không có Docker): chưa verify
+  được, chỉ xác nhận 2 test mới (và toàn bộ suite khác) compile/collect
+  được, không lỗi cú pháp/kiểu — fail đúng 1 lý do duy nhất
+  `Can't reach database server at localhost:5433`, giống hệt mọi suite
+  khác trong repo khi chạy ở máy không Docker. Đã verify thật sau đó — xem
+  ngay bên dưới.
+
+**Verify THẬT trên Docker thật (`npm run test:e2e`, dán nguyên văn từ
+log, không tóm tắt):**
+```
+❯ npm run test:e2e
+
+backend@0.0.1 test:e2e
+jest --config ./test/jest-e2e.json
+
+ PASS  test/read-api.e2e-spec.ts
+ PASS  test/batch-lifecycle.e2e-spec.ts
+ PASS  test/collection-runs.e2e-spec.ts
+ PASS  test/database-collector.e2e-spec.ts
+ PASS  test/management-events.e2e-spec.ts
+ PASS  test/crawler-collector.e2e-spec.ts
+ PASS  test/app.e2e-spec.ts
+
+Test Suites: 7 passed, 7 total
+Tests:       59 passed, 59 total
+Snapshots:   0 total
+Time:        7.929 s, estimated 8 s
+Ran all test suites.
+Jest did not exit one second after the test run has completed.
+
+'This usually means that there are asynchronous operations that weren't stopped in your tests. Consider running Jest with --detectOpenHandles to troubleshoot this issue.
+```
+Đọc đúng: **7/7 suite pass, 59/59 test** — gồm `read-api.e2e-spec.ts`
+(Step 10, cả 7 test: `GET /sources`, `GET /collection-runs?sourceId=`,
+`GET /canonical-events?batchId=` + provenance, `GET /production-lines`
+rollup WIP, `GET /production-lines` `lastEventAt`, `GET /production-lines`
+provenance links, `STALE_THRESHOLD_MINUTES` override) cùng 6 suite cũ của
+Step 5–9 vẫn pass nguyên, không suite nào bị ảnh hưởng bởi 2 field mới.
+Cảnh báo `Jest did not exit... --detectOpenHandles` vẫn xuất hiện — đã
+ghi nhận từ Step 6, chưa điều tra, không chặn tiến độ (không phải lỗi
+mới của Step 10).
 
 ## Việc cần làm ở máy có Docker
 
@@ -2105,16 +2183,14 @@ mới nhất:
       đủ, gồm cả 3 lệnh gọi HTTP thật (BLOCK, RESUME sau BLOCK, và RESUME
       trên batch chưa từng bị block → 400 — validation quan trọng nhất
       của Step 9, xác nhận đúng bằng gọi thật, không chỉ qua Jest).
-- [ ] **Step 10 — chưa verify, cần máy có Docker.** Không có migration
-      Prisma mới (chỉ thêm route đọc + 1 env var mới
-      `STALE_THRESHOLD_MINUTES`). `docker compose up -d --build`, rồi
-      `npm run test:e2e` — kỳ vọng `read-api.e2e-spec.ts` pass đủ 7 test
-      (`GET /sources`, `GET /collection-runs?sourceId=`, `GET
-      /canonical-events?batchId=` + provenance, `GET /production-lines`
-      rollup WIP, `GET /production-lines` `lastEventAt`, `GET
-      /production-lines` provenance links, `STALE_THRESHOLD_MINUTES`
-      override) cộng toàn bộ 6 suite cũ vẫn pass — tổng số liệu thật
-      (không đoán trước, xem entry "Step 10" bên trên cho lý do máy này
-      chưa chạy được). Sau khi có log thật:
-      sửa lại đúng entry "Step 10" (đổi trạng thái + dán log), rồi mới đề
-      xuất commit message thứ 2 cho phần verify.
+- [x] **Step 10 — đã verify thật.** Không có migration Prisma mới (chỉ
+      thêm route đọc + 1 env var mới `STALE_THRESHOLD_MINUTES`).
+      `docker compose up -d --build`, rồi `npm run test:e2e` — PASS thật,
+      59/59 test, 7 suite (`read-api.e2e-spec.ts` + 6 suite cũ) — xem
+      entry "Step 10 — bổ sung `lastEventAt` + provenance links sau khi
+      phát hiện qua gọi thật" bên trên cho bằng chứng log/curl thật đầy
+      đủ, gồm cả response thật của `GET /production-lines` (với
+      `lastEventAt`/`contributingSourceRecordIds`/
+      `contributingCollectionRunIds`, UUID thật, không placeholder) và
+      2 lần gọi cách nhau ~32 phút chứng minh `freshnessMinutes` tính
+      động, không phải giá trị cứng.
