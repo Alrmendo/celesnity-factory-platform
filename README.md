@@ -1778,7 +1778,10 @@ qua grep `STALE_THRESHOLD`).
        "completedQuantity": "number | null",
        "missingStations": ["SORTING", "..."],
        "freshnessStatus": "NO_DATA|OK|STALE", "freshnessMinutes": "number | null",
-       "qualityIndicators": [{ "code": "string", "acknowledged": "boolean" }]
+       "qualityIndicators": [{ "code": "string", "acknowledged": "boolean" }],
+       "lastEventAt": "ISO date | null",
+       "contributingSourceRecordIds": ["uuid", "..."],
+       "contributingCollectionRunIds": ["uuid", "..."]
      }]
    }]
    ```
@@ -1789,10 +1792,28 @@ qua grep `STALE_THRESHOLD`).
    KHÔNG có quan hệ Prisma thật tới bảng `Line`/`lines` (xem
    `schema.prisma`: `lineId String @map("line_id")`, không `@relation`),
    nên không liệt kê từ bảng `lines` (hiện chưa ai insert dữ liệu vào đó
-   ở bất kỳ step nào). `batchId` chính là "ID để link tới source records +
-   collection run liên quan" mà đề bài yêu cầu — dùng thẳng làm query
-   param cho `GET /canonical-events?batchId=<id>` ở mục 3, không cần thêm
-   ID nào khác.
+   ở bất kỳ step nào).
+   - `lastEventAt` (**thêm sau, xem "Bổ sung sau khi phát hiện qua gọi
+     thật" bên dưới**) — timestamp `eventTime` THẬT của canonical_event
+     đang nằm ở `currentStation` (tra bằng `canonicalKey` =
+     `${batchId}:${currentStation}`, unique). Khác với `freshnessMinutes`
+     (Step 4's `calculateFreshness`, KHÔNG sửa — lấy `eventTime` ACCEPTED
+     mới nhất trên TOÀN BỘ trạm của batch, có thể là 1 trạm khác
+     `currentStation`, xem case B004 trong `batch-state.ts`'s comment):
+     `lastEventAt` trả lời "cập nhật lúc nào" (mốc tuyệt đối tại đúng
+     trạm hiện tại), `freshnessMinutes`/`freshnessStatus` trả lời "cũ tới
+     mức nào" (dựa trên định nghĩa freshness đã có sẵn, không đổi). `null`
+     khi `currentStation` là `null` (batch PLANNED, chưa có event nào).
+   - `contributingSourceRecordIds`/`contributingCollectionRunIds` (**thêm
+     sau, xem bên dưới**) — "Links to the contributing source records and
+     collection run" theo đúng câu chữ đề bài. Toàn bộ `source_records.id`
+     (qua `canonical_event_sources`, MỌI trạm của batch chứ không chỉ
+     `currentStation`) đã góp phần tạo nên bất kỳ canonical_event nào của
+     batch này, và `collection_runs.id` suy ra từ
+     `source_records.collectionRunId` tương ứng (dedupe). `batchId` vẫn
+     dùng được làm query param cho `GET /canonical-events?batchId=<id>` ở
+     mục 3 để xem chi tiết provenance, nhưng 2 field này cho UI danh sách
+     ID sẵn luôn mà không cần gọi thêm request.
 
 5. `STALE_THRESHOLD_MINUTES` (env var mới, optional, default 15) — đọc
    qua `ConfigService` ngay trong `ProductionLinesController`, truyền
@@ -1911,6 +1932,114 @@ scenario mới:
   do `Can't reach database server at localhost:5433`, không có lỗi
   code/biên dịch nào.
 
+### Step 10 — bổ sung `lastEventAt` + provenance links sau khi phát hiện qua gọi thật — 2026-09-04
+
+Sau khi Step 10 xong và đã sang máy có Docker để gọi thật
+`GET /production-lines`, đối chiếu lại checklist đề bài gốc ("show: ...
+Last event time and data freshness ... Links to the contributing source
+records and collection run") phát hiện response thiếu 2 điều: chỉ có
+`freshnessMinutes` (số tương đối) mà không có timestamp tuyệt đối, và
+không có cách nào lấy được ID của source_records/collection_runs đã góp
+phần tạo nên batch đó (mới chỉ có `batchId`, phải tự suy ra qua
+`GET /canonical-events?batchId=` ở request khác). Máy sửa lỗi này lại
+**không có Docker** (khác máy đã gọi thật ở trên) — chỉ verify OFFLINE
+được, xem bên dưới.
+
+**Response thật đã gọi (batch B002, TRƯỚC khi sửa — bằng chứng của lỗi):**
+```json
+{
+  "batchId": "B002", "state": "IN_PROGRESS", "currentStation": "RECEIVING",
+  "completedQuantity": 100, "missingStations": [], "freshnessStatus": "STALE",
+  "freshnessMinutes": 354534, "qualityIndicators": []
+}
+```
+
+**Đã làm:**
+- `ProductionLinesController` (`production-lines.controller.ts`) — thêm 2
+  method private mới, KHÔNG đụng `ProductionDomainService`/
+  `batch-state.ts`/`freshness.ts`/`canonicalization.service.ts`:
+  - `getLastEventAt(batchId, currentStation)` — tra `canonicalEvent` theo
+    `canonicalKey` (`${batchId}:${currentStation}`, unique index sẵn có)
+    lấy đúng `eventTime` của canonical_event tại `currentStation`.
+    `currentStation` nhận thẳng từ `BatchStatusResult` đã được
+    `getBatchStatus` (Step 4/5, không sửa) tính sẵn — KHÔNG tự suy diễn
+    lại Rule 6 ở đây để tránh trùng lặp logic domain.
+  - `getProvenance(batchId)` — query `canonicalEventSource` lọc theo
+    `canonicalEvent.batchId`, lấy `sourceRecordPk` (→
+    `contributingSourceRecordIds`, dedupe qua toàn bộ trạm của batch,
+    không chỉ `currentStation`) và `sourceRecord.collectionRunId` (→
+    `contributingCollectionRunIds`, dedupe).
+  - Cả 2 gọi song song với `getBatchStatus` bằng `Promise.all` cho mỗi
+    batch — không đổi thứ tự/độ phức tạp N+1 vốn đã chấp nhận từ khi viết
+    Step 10 gốc (quy mô fixture nhỏ, ưu tiên tái sử dụng đúng hơn tối ưu
+    hoá truy vấn).
+- `test/read-api.e2e-spec.ts` — thêm 2 test mới vào describe
+  `GET /production-lines` sẵn có (dùng lại B001/B002/B006, không bịa
+  scenario mới):
+  - `lastEventAt` đúng `eventTime` thật của canonical_event tại
+    `currentStation` — dùng B002 (RECEIVING ACCEPTED, `eventTime === T0`
+    chính xác theo `batch-scenarios.ts`), assert `lastEventAt ===
+    T0.toISOString()`; kèm B001 (PLANNED, không có event nào) assert
+    `lastEventAt === null`.
+  - `contributingSourceRecordIds`/`contributingCollectionRunIds` đúng —
+    dùng B006 (2 nguồn: `Production Database` DATABASE-only 5 trạm
+    RECEIVING..FOLDING + `Application API` chỉ DISPATCH, tổng 7
+    `source_records`, 2 `collection_runs`), query lại thẳng qua Prisma
+    trong test để lấy "expected" độc lập với code đang test, rồi so khớp
+    với response — assert đúng 7 id source record + 2 id collection run,
+    không thiếu/thừa.
+
+**Response mẫu MỚI (dựng tay theo đúng logic code vừa sửa, CHƯA phải
+curl thật — máy sửa lỗi này không có Docker để gọi lại; ID là placeholder
+minh hoạ shape, giá trị `lastEventAt` suy đúng từ `eventTime` seed thật
+của B002 = `T0` trong `batch-scenarios.ts`/`prisma/seed.ts` =
+`2026-01-01T00:00:00.000Z`, khớp với `freshnessMinutes: 354534` đã thấy ở
+response thật phía trên — 354534 phút ≈ 246.2 ngày kể từ 2026-01-01, đúng
+khoảng cách tới ngày gọi thật):**
+```json
+{
+  "batchId": "B002", "workOrderId": "WO-B002",
+  "state": "IN_PROGRESS", "currentStation": "RECEIVING",
+  "completedQuantity": 100, "missingStations": [], "freshnessStatus": "STALE",
+  "freshnessMinutes": 354534, "qualityIndicators": [],
+  "lastEventAt": "2026-01-01T00:00:00.000Z",
+  "contributingSourceRecordIds": ["<uuid-của-source_record-B002-RECEIVING>"],
+  "contributingCollectionRunIds": ["<uuid-của-collection_run-Production-Database>"]
+}
+```
+
+**Quyết định phát sinh:**
+- `lastEventAt` lấy `eventTime` (thời điểm nghiệp vụ do nguồn báo cáo),
+  KHÔNG lấy `canonical_events.updated_at` (thời điểm hệ thống ghi/tính
+  lại record) — nhất quán với định nghĩa freshness đã có sẵn từ Step 4
+  (`calculateFreshness` cũng dùng `eventTime`, không dùng `receivedAt`
+  hay `updatedAt`), tránh 2 khái niệm "thời gian" lệch nhau trong cùng 1
+  response.
+- `contributingSourceRecordIds`/`contributingCollectionRunIds` tính trên
+  TOÀN BỘ trạm của batch (không chỉ `currentStation`) — đúng câu chữ đề
+  bài "the contributing source records and collection run" áp dụng cho
+  cả batch, không giới hạn phạm vi ở trạm hiện tại; UI có thể cần xem lại
+  provenance của các trạm đã qua, không chỉ trạm mới nhất.
+
+**Verify OFFLINE (không cần Docker/Postgres — chỉ cần Node):**
+- `npx tsc --noEmit` sạch toàn repo (không output, exit 0).
+- `npm run lint` (`eslint --fix`) sạch toàn repo, không output, exit 0.
+- `npm run test`: vẫn 22/22 pass, không case nào mới — dán nguyên output:
+  ```
+  PASS src/app.controller.spec.ts
+  PASS src/modules/canonicalization/canonicalization.pipeline.spec.ts
+  PASS src/modules/production-domain/batch-state.spec.ts
+  PASS src/modules/production-domain/freshness.spec.ts
+
+  Test Suites: 4 passed, 4 total
+  Tests:       22 passed, 22 total
+  ```
+- `npm run test:e2e` — **chưa verify, cần máy có Docker** (máy này không
+  có Docker). Đã thử chạy để xác nhận 2 test mới (và toàn bộ suite khác)
+  compile/collect được, không lỗi cú pháp/kiểu — fail đúng 1 lý do duy
+  nhất `Can't reach database server at localhost:5433`, giống hệt mọi
+  suite khác trong repo khi chạy ở máy không Docker.
+
 ## Việc cần làm ở máy có Docker
 
 Checklist thủ công — làm ở máy laptop có Docker chạy được, sau khi pull code
@@ -1979,11 +2108,13 @@ mới nhất:
 - [ ] **Step 10 — chưa verify, cần máy có Docker.** Không có migration
       Prisma mới (chỉ thêm route đọc + 1 env var mới
       `STALE_THRESHOLD_MINUTES`). `docker compose up -d --build`, rồi
-      `npm run test:e2e` — kỳ vọng `read-api.e2e-spec.ts` pass đủ 5 test
+      `npm run test:e2e` — kỳ vọng `read-api.e2e-spec.ts` pass đủ 7 test
       (`GET /sources`, `GET /collection-runs?sourceId=`, `GET
       /canonical-events?batchId=` + provenance, `GET /production-lines`
-      rollup WIP, `STALE_THRESHOLD_MINUTES` override) cộng toàn bộ 6 suite
-      cũ vẫn pass — tổng số liệu thật (không đoán trước, xem entry "Step
-      10" bên trên cho lý do máy này chưa chạy được). Sau khi có log thật:
+      rollup WIP, `GET /production-lines` `lastEventAt`, `GET
+      /production-lines` provenance links, `STALE_THRESHOLD_MINUTES`
+      override) cộng toàn bộ 6 suite cũ vẫn pass — tổng số liệu thật
+      (không đoán trước, xem entry "Step 10" bên trên cho lý do máy này
+      chưa chạy được). Sau khi có log thật:
       sửa lại đúng entry "Step 10" (đổi trạng thái + dán log), rồi mới đề
       xuất commit message thứ 2 cho phần verify.

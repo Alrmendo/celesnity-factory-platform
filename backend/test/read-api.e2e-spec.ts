@@ -261,6 +261,89 @@ describe('Read APIs for Data Sources + Production Lines views (Step 10, real Pos
     expect(byId.B007.state).toBe('BLOCKED');
     expect(byId.B008.state).toBe('COMPLETED');
   });
+
+  it('GET /production-lines: lastEventAt is the real eventTime of the canonical_event at currentStation', async () => {
+    const scenarios = await buildBatchScenarios(prisma);
+    // B002: single ACCEPTED at RECEIVING, eventTime === T0 exactly — see
+    // batch-scenarios.ts. currentStation is RECEIVING, so lastEventAt must
+    // equal T0 exactly, not just "close to now" or freshnessMinutes's
+    // separately-derived basis (see BatchLineView's comment in
+    // production-lines.controller.ts on why the two can differ in general).
+    await canonicalizationService.ingestBatch(scenarios.B002.sourceRecords);
+
+    const res = await request(app.getHttpServer())
+      .get('/production-lines')
+      .expect(200);
+    const body = res.body as Array<{
+      lineId: string;
+      batches: Array<{
+        batchId: string;
+        currentStation: string | null;
+        lastEventAt: string | null;
+      }>;
+    }>;
+
+    const b002 = body[0].batches.find((b) => b.batchId === 'B002')!;
+    expect(b002.currentStation).toBe('RECEIVING');
+    expect(b002.lastEventAt).toBe(T0.toISOString());
+
+    // PLANNED batch (no canonical_event at all) -> null, not a crash.
+    const b001 = body[0].batches.find((b) => b.batchId === 'B001')!;
+    expect(b001.currentStation).toBeNull();
+    expect(b001.lastEventAt).toBeNull();
+  });
+
+  it('GET /production-lines: contributingSourceRecordIds/contributingCollectionRunIds cover every source_record + collection_run behind the batch', async () => {
+    const scenarios = await buildBatchScenarios(prisma);
+    // B006: 5 upstream DATABASE-only records (RECEIVING..FOLDING) + 1
+    // DATABASE + 1 API record both at DISPATCH (CONFLICT, Rule 5.4) = 7
+    // source_records total, from exactly 2 sources/2 collection_runs
+    // (databaseSource+databaseRun, apiSource+apiRun — see
+    // batch-scenarios.ts's buildBatchScenarios). Picked over B002 (only 1
+    // source_record) specifically because it has enough distinct
+    // records/sources to actually exercise dedup.
+    await canonicalizationService.ingestBatch(scenarios.B006.sourceRecords);
+
+    const expectedSourceRecordIds = (
+      await prisma.sourceRecord.findMany({
+        where: { batchId: 'B006' },
+        select: { id: true },
+      })
+    )
+      .map((r) => r.id)
+      .sort();
+    const expectedCollectionRunIds = [
+      ...new Set(
+        (
+          await prisma.sourceRecord.findMany({
+            where: { batchId: 'B006' },
+            select: { collectionRunId: true },
+          })
+        ).map((r) => r.collectionRunId),
+      ),
+    ].sort();
+    expect(expectedSourceRecordIds).toHaveLength(7);
+    expect(expectedCollectionRunIds).toHaveLength(2);
+
+    const res = await request(app.getHttpServer())
+      .get('/production-lines')
+      .expect(200);
+    const body = res.body as Array<{
+      batches: Array<{
+        batchId: string;
+        contributingSourceRecordIds: string[];
+        contributingCollectionRunIds: string[];
+      }>;
+    }>;
+
+    const b006 = body[0].batches.find((b) => b.batchId === 'B006')!;
+    expect(b006.contributingSourceRecordIds.slice().sort()).toEqual(
+      expectedSourceRecordIds,
+    );
+    expect(b006.contributingCollectionRunIds.slice().sort()).toEqual(
+      expectedCollectionRunIds,
+    );
+  });
 });
 
 describe('Freshness threshold configurable via STALE_THRESHOLD_MINUTES (Step 10, real Postgres)', () => {
