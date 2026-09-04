@@ -20,7 +20,8 @@
     "test:e2e": "jest --config ./test/jest-e2e.json",
     "seed": "ts-node --compiler-options \"{\\\"module\\\":\\\"commonjs\\\"}\" prisma/seed.ts",
     "verify:step6": "bash ../scripts/verify-step6.sh",
-    "verify:step8": "bash ../scripts/verify-step8.sh"
+    "verify:step8": "bash ../scripts/verify-step8.sh",
+    "verify:step9": "bash ../scripts/verify-step9.sh"
   },
   "dependencies": {
     "@nestjs/common": "^11.0.1",

@@ -42,6 +42,14 @@ lập bằng `docker compose up` như trên máy local bình thường.
   chỉ định cụ thể công nghệ; đây là quyết định thiết kế tự đặt ra (đã dừng
   lại hỏi người dùng xác nhận qua `AskUserQuestion` trước khi code — xem
   entry "Step 7" trong Nhật ký triển khai bên dưới).
+- Route shape cho Management Events (Step 9) — `POST
+  /management-events/block|resume|ack-exception|note`, body `{ batchId,
+  actor, note? }` — là thiết kế tự đặt ra. Không có REST contract cụ thể
+  nào cho phần này trong `docs/plan-v4.md` (chỉ ghi "REST contract khung
+  của v3 vẫn giữ nguyên", nhưng `celesnity-assessment-plan-v3.md` không
+  tồn tại trong repo — đã xác nhận lại) lẫn trong đề bài gốc (PDF, mục
+  "Management Events" chỉ liệt kê 4 hành động bắt buộc, không có route/
+  request shape). Xem entry "Step 9" trong Nhật ký triển khai bên dưới.
 
 ## Trạng thái hiện tại
 
@@ -92,8 +100,16 @@ không lặp lại ở đây.
   record crawl được gán cứng station RECEIVING, KHÔNG retry (đúng đề bài
   gốc — chỉ Application API cần retry), KHÔNG có secret (portal công
   khai, không auth).
-- **Chưa làm**: `ManagementEventsModule` ghi thật (POST block/resume/ack/
-  note) và UI — bước tiếp theo sau Step 8.
+- Step 9 (code xong, **CHƯA verify Docker thật** — máy này không có
+  Docker; xem entry Step 9 bên dưới): `ManagementEventsModule` ghi thật —
+  4 action (BLOCK/RESUME/ACK_EXCEPTION/ADD_NOTE) qua `POST
+  /management-events/*`, append-only tuyệt đối (chỉ `.create()`, không có
+  route/method nào update/xoá), luôn có `organizationId`/`actor`/
+  `timestamp` thật. Logic derive `acknowledged` (Rule 5b) và đọc
+  `management_events` cho batch state (Rule 7 — BLOCKED) **đã có sẵn từ
+  Step 5**, không phải code mới — Step 9 chỉ thêm phần GHI còn thiếu.
+- **Chưa làm**: UI (2 màn Data Sources + Production Lines) — bước tiếp
+  theo sau Step 9.
 
 Backend là modular monolith NestJS, 5 module nghiệp vụ:
 
@@ -115,8 +131,13 @@ Backend là modular monolith NestJS, 5 module nghiệp vụ:
   "Retry of transient failures" chỉ yêu cầu cho Application API)
 - `CanonicalizationModule` — có pipeline Rule 1–5b + wiring Prisma thật
 - `ProductionDomainModule` — có logic Rule 6–7 + wiring Prisma thật
-- `ManagementEventsModule` — rỗng, chưa ghi được (chỉ đọc management_events
-  qua Prisma trực tiếp trong test/seed hôm nay)
+- `ManagementEventsModule` — `POST /management-events/block|resume|
+  ack-exception|note` (Step 9), append-only (chỉ `.create()`), luôn gắn
+  `organizationId` (seeded, `SEED_ORGANIZATION_ID`)/`actor` (từ caller)/
+  `timestamp` (server, `new Date()`, không tin client). `resume` reuse
+  `resolveIsBlocked` (Step 4, batch-state.ts) để từ chối resume khi chưa
+  bị block; `ack-exception` từ chối khi batch không có canonical event
+  CONFLICT nào
 
 ## Nhật ký triển khai
 
@@ -1428,6 +1449,176 @@ thích rõ lý do cho reviewer):**
   nếu còn dư (cả 3 step cộng dồn khả năng có nhiều hơn 1 connection
   pool/HTTP agent chưa đóng đúng lúc, không chỉ riêng 1 nguồn).
 
+### Step 9 — 2026-09-03
+
+**Trạng thái: code xong, verify OFFLINE pass — CHƯA verify Docker thật
+(máy này không có Docker chạy được), chờ máy có Docker.**
+
+**Kiểm tra trước khi code (theo yêu cầu của prompt Step 9) — kết quả:**
+1. Bảng `management_events` **đã tồn tại từ Step 2** (`schema.prisma`,
+   dòng ~202) — đúng như dự đoán, **KHÔNG cần migration mới** cho Step 9,
+   chỉ cần service/controller ghi thật vào bảng có sẵn.
+2. Seeded organization: **đã có sẵn** — `prisma/seed.ts` (Step 5) đã tự
+   định nghĩa `SEED_ORGANIZATION_ID = 'org-seed'` làm hằng số cục bộ,
+   nhưng CHƯA được chia sẻ ra ngoài file đó. Đã refactor: chuyển thành
+   `SEED_ORGANIZATION_ID` export từ
+   `backend/src/modules/management-events/constants.ts`, `prisma/seed.ts`
+   import lại hằng số này thay vì tự khai báo riêng — đúng chỉ dẫn "đừng
+   hardcode giá trị rải rác nhiều nơi". Seeded actor: **KHÔNG có** hằng số
+   dùng chung nào (chỉ có giá trị `'ops-1'` rải rác trong
+   `batch-scenarios.ts`'s management events, không phải constant chính
+   thức) — xem "Quyết định phát sinh" bên dưới về lý do KHÔNG thêm 1 hằng
+   số actor seeded tương tự.
+3. Logic tính `acknowledged` (Rule 5b): **đã tồn tại đầy đủ, đã DB-wired
+   từ Step 5** — không chỉ là pure function chưa nối. Phát hiện ngay khi
+   đọc lại `ProductionDomainService.getBatchStatus`
+   (`production-domain.service.ts`): đã tự query `management_events` thật
+   qua Prisma và derive `acknowledged` bằng cách so `ACK_EXCEPTION`
+   timestamp với `canonical_event.updatedAt` (đúng nguyên văn cách diễn
+   giải "cùng station" đã ghi trong `docs/HANDOFF.md` mục 6). Tương tự,
+   `resolveIsBlocked`/`resolveBatchState` (Rule 7, `batch-state.ts`, Step
+   4) cũng đã được `getBatchStatus` gọi thật với `management_events` đọc
+   từ DB — batch state BLOCKED đã hoạt động đúng từ Step 5, chỉ là chưa
+   từng có cách nào GHI 1 row `BLOCK` thật qua HTTP (trước Step 9, chỉ
+   test/seed tự insert thẳng qua Prisma). **Kết luận: Step 9 chỉ cần thêm
+   phần GHI (4 endpoint POST) — phần ĐỌC/tính toán state không cần sửa gì
+   cả.**
+
+**Đã làm:**
+- `backend/src/modules/management-events/constants.ts` (mới) —
+  `SEED_ORGANIZATION_ID = 'org-seed'`, dùng chung giữa `prisma/seed.ts` và
+  `ManagementEventsService` (xem mục kiểm tra #2 ở trên).
+- `backend/src/modules/management-events/types.ts` (mới) —
+  `ManagementActionDto` (`{ batchId, actor, note? }`, dùng cho
+  block/resume/ack-exception) và `AddNoteDto` (`{ batchId, actor, note }`,
+  `note` bắt buộc). Không dùng `class-validator` — nhất quán với quyết
+  định đã ghi ở Step 6 (chưa module nào trong codebase dùng validation
+  pipe).
+- `ManagementEventsService` (viết lại từ rỗng) — 4 method:
+  - `block`: không có precondition, cho phép block lại (manager re-block
+    vì lý do khác).
+  - `resume`: reuse thẳng `resolveIsBlocked` (Step 4, `batch-state.ts`,
+    **không đổi 1 dòng**) trên lịch sử `management_events` thật của batch
+    — từ chối (400) nếu batch hiện KHÔNG bị block.
+  - `ackException`: từ chối (400) nếu batch không có canonical event nào
+    đang `CONFLICT`.
+  - `addNote`: từ chối (400) nếu `note` rỗng/thiếu.
+  - Tất cả 4 method chỉ gọi `prisma.managementEvent.create()` — không có
+    `.update()`/`.delete()` nào trên bảng này ở bất kỳ đâu trong service
+    (append-only tuyệt đối, đúng "Do not overwrite collected source
+    history"). `timestamp` luôn là `new Date()` lấy ở server, KHÔNG BAO
+    GIỜ nhận từ request body — một audit log append-only sẽ mất ý nghĩa
+    nếu caller có thể tự ghi lùi ngày.
+  - `organizationId` luôn gán cứng `SEED_ORGANIZATION_ID`; `actor` bắt
+    buộc lấy từ request body (không seed cứng — xem "Quyết định phát
+    sinh").
+- `ManagementEventsController` (viết lại từ rỗng) — `POST
+  /management-events/block|resume|ack-exception|note`, chỉ có handler
+  `POST` (đúng route shape tự thiết kế, xem "Assessment Assumptions" ở
+  trên).
+- `backend/prisma/seed.ts`: import `SEED_ORGANIZATION_ID` từ constant
+  dùng chung thay vì tự khai báo lại (refactor thuần, không đổi hành vi
+  seed).
+- `backend/test/management-events.e2e-spec.ts` (Step 9, DB thật, KHÔNG
+  cần fixture service mới — bảng đã có sẵn từ Step 2): nhóm "4 action ghi
+  đúng row" (`test.each` qua action, chung 1 `beforeEach` tạo cả 4 event
+  thật qua HTTP); B006 end-to-end (ACK_EXCEPTION không đổi
+  `canonical_event.status`, chỉ đổi `acknowledged`); `ack-exception` bị từ
+  chối khi không có CONFLICT; BLOCK giữ state BLOCKED dù có event ACCEPTED
+  upstream (RECEIVING); `resume` bị từ chối khi chưa từng bị block;
+  `resume` sau `block` → state đúng Rule 7 (`test.each` 2 nhánh: có
+  event → IN_PROGRESS, không có event → PLANNED); `note` bị từ chối khi
+  rỗng; append-only (`test.each` PUT/PATCH/DELETE → 404, route không tồn
+  tại).
+- `scripts/verify-step9.sh` (`chmod +x`, `bash -n` sạch) — mirror
+  `verify-step6.sh`/`verify-step8.sh`: preflight rebuild+health-check cả 5
+  service, `npm run test:e2e` đầy đủ, 3 lần gọi thật (`POST
+  /management-events/block` → `resume` trên 1 batchId MỚI hoàn toàn —
+  không cần seed/đăng ký trước vì `management_events` không có FK tới
+  `batches`; + 1 lần `resume` trên batchId chưa từng bị block để bắt bằng
+  chứng 400 thật). Script `verify:step9` trong `backend/package.json`.
+  Viết xong, KHÔNG tự chạy được (máy này không có Docker).
+
+**Vấn đề gặp phải:**
+- Không có bug code tự phát hiện nào đáng ghi lại ở Step 9 (khác Step 7's
+  `let rows`/Step 8's `resolveNextUrl` — cả 2 bug trước đều nằm ở logic
+  parse/type-inference phức tạp; Step 9 phần lớn là CRUD append-only đơn
+  giản, không có phần nào tương tự). `tsc --noEmit` sạch ngay từ lần chạy
+  đầu, bao gồm cả việc gán `ManagementAction` (Prisma enum) trực tiếp vào
+  tham số kiểu `ManagementAction` của `prisma.managementEvent.create()`
+  không cần ép kiểu — xác nhận đúng suy đoán ban đầu (Prisma sinh enum
+  dạng string-literal union, cùng cách `production-domain.service.ts` đã
+  làm từ Step 5 khi gán `row.action` ngược lại vào
+  `ManagementEventInput.action`).
+- KHÔNG có route `GET /batches/:batchId/status` (hoặc tương đương) nào để
+  test qua HTTP thật — `ProductionDomainController` vẫn rỗng từ Step 1
+  (chưa ai wire route cho `ProductionDomainService.getBatchStatus`, kể cả
+  ở Step 5). Việc thêm route đó KHÔNG nằm trong phạm vi 4 việc liệt kê ở
+  Step 9 (chỉ "ManagementEventsService với 4 action"), nên test đọc lại
+  state qua injection trực tiếp `productionDomainService.getBatchStatus()`
+  trong Nest testing module — đúng pattern đã dùng ở B006 test của
+  `collection-runs.e2e-spec.ts` (Step 6) — không phải qua HTTP. Route GET
+  batch status để UI dùng thật sẽ cần khi làm UI (bước sau Step 9), chưa
+  làm ở đây để không lấn phạm vi.
+
+**Quyết định phát sinh:**
+- Route shape `POST /management-events/block|resume|ack-exception|note`
+  (batchId nằm trong body, không phải path param) — xem lý do đầy đủ ở
+  mục "Assessment Assumptions" phía trên: không có REST contract nào cho
+  phần này trong `docs/plan-v4.md` hay đề bài gốc, đây là thiết kế tự
+  đặt ra.
+- `actor` bắt buộc lấy từ request body của caller, KHÔNG dùng 1 hằng số
+  seeded cố định giống `organizationId` — dù đề bài cho phép "seeded...
+  actor" như 1 lựa chọn. Lý do: không giống "tổ chức nào" (chỉ có đúng 1
+  tổ chức trong toàn app, không có gì để chọn), "actor nào đang thao tác"
+  là thông tin thật sự khác nhau giữa các lần gọi (2 manager khác nhau
+  block/resume/ack cùng 1 batch) — cố định cứng giá trị này sẽ làm audit
+  log mất hết ý nghĩa phân biệt "ai đã làm gì", trong khi hệ thống không
+  có auth để tự suy ra danh tính actor theo cách nào khác ngoài để caller
+  tự khai báo.
+- `resume` từ chối (400) khi batch hiện KHÔNG bị block, tái dùng thẳng
+  `resolveIsBlocked` (Step 4, không sửa) để kiểm tra — không bắt buộc bởi
+  Rule 7 (state vẫn tính đúng dù có 1 event RESUME "ma" không đi kèm
+  BLOCK nào, vì `resolveIsBlocked` tự nhiên bỏ qua nó), nhưng 1 lệnh
+  resume trên batch chưa từng bị block gần như chắc chắn là bug UI/double-
+  click — báo lỗi rõ ràng ngay lúc đó tốt hơn là âm thầm ghi 1 event vô
+  nghĩa vào log vĩnh viễn không xoá được.
+- `ackException` từ chối (400) khi batch không có canonical event nào
+  đang `CONFLICT` — tương tự lý do trên (chặn hành động vô nghĩa ngay từ
+  đầu). KHÔNG kiểm tra thêm liệu CONFLICT đó đã được acknowledge hay chưa
+  — ack lại 1 CONFLICT đã acknowledge là vô hại và hợp lệ (ví dụ CONFLICT
+  tái diễn ở lần thu thập sau), chỉ thêm 1 dòng audit mới, đúng tinh thần
+  append-only.
+- KHÔNG kiểm tra `batchId` có tồn tại trong bảng `batches` hay chưa trước
+  khi ghi management event — nhất quán với quyết định gốc từ Step 2:
+  `source_records`/`canonical_events`/`management_events.batch_id` cố
+  tình KHÔNG có FK tới `batches` (comment sẵn trong `schema.prisma`), vì
+  raw/audit layer không phụ thuộc business layer. Hệ quả trực tiếp: có
+  thể ghi management event cho 1 `batchId` "chưa tồn tại" theo nghĩa
+  nghiệp vụ — chấp nhận được, cùng triết lý với toàn bộ phần còn lại của
+  hệ thống.
+- `timestamp` luôn là `new Date()` phía server, không bao giờ nhận từ
+  request body dù `ManagementActionDto` có thể dễ dàng thêm field này —
+  cố tình KHÔNG thêm, để không ai vô tình cho phép client tự ghi timestamp
+  giả vào 1 audit log lẽ ra phải đáng tin tuyệt đối.
+
+**Verify OFFLINE (không cần Docker/Postgres — chỉ cần Node):**
+- `npx tsc --noEmit` sạch toàn repo.
+- `npx eslint "{src,apps,libs,test}/**/*.ts"` sạch toàn repo (chạy lại sau
+  `--fix`, đúng bài học Step 3/6).
+- `npm run test`: vẫn 22/22 pass, không case nào mới (mọi test Step 9 đều
+  đụng DB thật nên nằm ở `test:e2e`, chưa chạy được) — dán nguyên output:
+  ```
+  PASS src/modules/canonicalization/canonicalization.pipeline.spec.ts
+  PASS src/modules/production-domain/freshness.spec.ts
+  PASS src/modules/production-domain/batch-state.spec.ts
+  PASS src/app.controller.spec.ts
+
+  Test Suites: 4 passed, 4 total
+  Tests:       22 passed, 22 total
+  ```
+- `bash -n scripts/verify-step9.sh` sạch.
+
 ## Việc cần làm ở máy có Docker
 
 Checklist thủ công — làm ở máy laptop có Docker chạy được, sau khi pull code
@@ -1484,3 +1675,26 @@ mới nhất:
       `fault=malformed` xác nhận đúng hành vi skip-row-không-fail-run.
       Không có migration Prisma mới ở Step 8 nên không gặp lại cạm bẫy
       #11.
+- [ ] **Step 9 — chưa verify, làm sau khi các mục trên xong**:
+      - Không có migration Prisma mới ở Step 9 (bảng `management_events`
+        đã có sẵn từ Step 2) — bước `npx prisma migrate dev` KHÔNG cần
+        chạy lại, chỉ nhắc lại cạm bẫy #11 (`docs/HANDOFF.md`) đề phòng
+        nếu có thay đổi schema phát sinh khi verify thật.
+      - `docker compose up -d --build` — verify cả 5 service lên
+        `healthy` (Step 9 không thêm service mới), dán log thật.
+      - `cd backend && npm run test:e2e` — phải thấy
+        `management-events.e2e-spec.ts` pass đủ: nhóm 4 action ghi đúng
+        row (`test.each`), B006 ACK_EXCEPTION không đổi status, từ chối
+        ack khi không có CONFLICT, BLOCK giữ state dù có event upstream,
+        từ chối resume khi chưa block, resume sau block đúng Rule 7
+        (`test.each` 2 nhánh), từ chối note rỗng, append-only
+        (`test.each` PUT/PATCH/DELETE → 404) — liệt kê từng case trong
+        output, không tóm tắt bằng số lượng. Đồng thời xác nhận 5 suite
+        e2e cũ (Step 5/6/7/8) vẫn pass, tổng cộng phải ra một con số thật
+        (không đoán trước).
+      - `npm run verify:step9` (`scripts/verify-step9.sh`, đã viết + `bash
+        -n` sạch, xem entry Step 9) — chạy thật lần đầu, dán log thật vào
+        `step9-verification-<timestamp>.log`.
+      - Sau khi có log thật ở trên: sửa lại đúng entry "Step 9" phía trên
+        (đổi trạng thái từ "CHƯA verify Docker thật" thành kết quả thật +
+        dán log), rồi mới đề xuất commit message thứ 2 cho phần verify.

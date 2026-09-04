@@ -9,10 +9,9 @@
 
 import 'dotenv/config';
 import { CanonicalizationService } from '../src/modules/canonicalization/canonicalization.service';
+import { SEED_ORGANIZATION_ID } from '../src/modules/management-events/constants';
 import { PrismaService } from '../src/prisma/prisma.service';
 import { buildBatchScenarios } from '../test/fixtures/batch-scenarios';
-
-const SEED_ORGANIZATION_ID = 'org-seed';
 
 async function main(): Promise<void> {
   const prisma = new PrismaService();
