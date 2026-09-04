@@ -17,9 +17,27 @@ cp .env.example .env   # chỉnh giá trị nếu cần
 docker compose up --build
 ```
 
+Migration (`npx prisma migrate deploy`) chạy TỰ ĐỘNG mỗi khi container
+`backend` khởi động (`docker-compose.yml`'s `command:`, xem entry "Verify
+cuối cùng trước khi nộp bài" bên dưới) — không cần chạy tay bước này.
+
+Sau khi cả 5 service `healthy` (`docker compose ps`), seed dữ liệu mẫu
+(10 batch scenario B001–B008/B005A/B005B/B006 + 3 Source
+`Production Database`/`Application API`/`Supplier Portal` sẵn dùng được
+qua UI) — script này chạy TRÊN HOST (không phải trong container), nên
+cần `backend/.env` riêng (khác `.env` ở gốc repo dùng cho
+`docker compose`):
+
+```bash
+cp backend/.env.example backend/.env   # DATABASE_URL trỏ localhost:5433 (port host, khác 5432 trong container)
+cd backend && npm run seed
+```
+
 - Backend: http://localhost:3001 (health check: `GET /health`)
 - Frontend: http://localhost:3000
-- Postgres: localhost:5432
+- Postgres: localhost:5433 (port host — publish qua `docker-compose.yml`'s
+  `"5433:5432"`, KHÔNG phải 5432 mặc định — 5432 chỉ đúng bên TRONG mạng
+  Docker nội bộ)
 
 Chạy backend trực tiếp trên host (ngoài Docker) để dev nhanh hơn: xem
 `backend/.env.example` (dùng `DB_HOST=localhost` vì Postgres publish port ra
@@ -90,10 +108,14 @@ lập bằng `docker compose up` như trên máy local bình thường.
 
 ## Trạng thái hiện tại
 
-Đã xong Step 1–5 trong kế hoạch (code). Kiến trúc đầy đủ, data model, và
+**Đã xong toàn bộ Step 1–12 (backend + frontend), verify THẬT trên
+Docker thật, kể cả từ 1 lần `git clone` sạch — xem entry "Verify cuối
+cùng trước khi nộp bài" ở cuối file.** Kiến trúc đầy đủ, data model, và
 Domain Rules v2.2 được ghi chi tiết trong
 [`docs/plan-v4.md`](docs/plan-v4.md) — đó là tài liệu tham chiếu chính,
-không lặp lại ở đây.
+không lặp lại ở đây. Các bullet bên dưới giữ nguyên làm nhật ký tiến độ
+theo từng Step (không xoá/rút gọn), đọc entry "Verify cuối cùng trước
+khi nộp bài" nếu chỉ cần biết trạng thái hiện tại.
 
 - Schema Postgres (9 bảng, Prisma, `backend/prisma/schema.prisma`) đã
   migrate và verify constraint/FK thật trên máy có Docker.
@@ -157,27 +179,32 @@ không lặp lại ở đây.
   dụng nguyên `ProductionDomainService.getBatchStatus`, không viết lại
   logic domain). `STALE_THRESHOLD_MINUTES` (env var, default 15) giờ
   configurable. Chỉ backend — chưa có code frontend.
-- Step 11 (frontend, code + 3 fix sau khi test tay UI thật — xem entry
-  "Step 11" và "Step 11 — bổ sung..." bên dưới): Data Sources view
+- Step 11 **HOÀN TẤT, đã click-test + verify THẬT trên Docker thật**
+  (xem entry "Step 11", "Step 11 — bổ sung..." và "Verify cuối cùng
+  trước khi nộp bài" bên dưới): Data Sources view
   (`frontend/app/sources/`, `frontend/app/canonical-events/`) —
   register/verify/discover/select/run collection/lịch sử/preview
-  provenance, gọi thẳng các endpoint Step 6–10 qua `lib/api.ts`. Đã tự
-  test tay 1 lần trên Docker, tìm ra + sửa 3 bug thật (seed CRAWLER sai/
-  leak test data, "Internal server error" che lỗi thật, thiếu xác nhận
-  Select) — build sạch offline, **CHƯA re-test lại 3 fix qua trình duyệt
-  thật**.
-- Step 12 (frontend, **build sạch — CHƯA tự click-test trên trình duyệt
-  thật**, máy này không có Docker; xem entry "Step 12" bên dưới):
-  Production Lines view (`frontend/app/production-lines/`) — rollup theo
-  line/station/batch (progress, WIP, freshness, exceptions, provenance)
-  + 4 management action (Block/Resume/Acknowledge exception/Add note)
-  gọi thẳng `POST /management-events/*` (Step 9), tái sử dụng trang
-  preview `/canonical-events` (Step 11) cho provenance thay vì dựng lại
-  UI riêng. **Đây là view UI cuối cùng trong checklist đề bài gốc — cả 2
-  màn Data Sources + Production Lines đã có code.**
-- **Chưa làm**: click-test bằng mắt trên trình duyệt thật cho cả Step
-  11 (3 fix) và Step 12 — máy này không có Docker, để lại cho máy có
-  Docker (xem checklist "Việc cần làm ở máy có Docker" bên dưới).
+  provenance, gọi thẳng các endpoint Step 6–10 qua `lib/api.ts`. Test tay
+  qua UI + `scripts/final-check.sh` (24/24 PASS) đã tìm ra + sửa 3 bug
+  thật (seed CRAWLER sai/leak test data, "Internal server error" che lỗi
+  thật, thiếu xác nhận Select), sau đó re-test lại PASS thật.
+- Step 12 **HOÀN TẤT, đã click-test + verify THẬT trên Docker thật**
+  (xem entry "Step 12" và "Verify cuối cùng trước khi nộp bài" bên
+  dưới): Production Lines view (`frontend/app/production-lines/`) —
+  rollup theo line/station/batch (progress, WIP, freshness, exceptions,
+  provenance) + 4 management action (Block/Resume/Acknowledge
+  exception/Add note) gọi thẳng `POST /management-events/*` (Step 9),
+  tái sử dụng trang preview `/canonical-events` (Step 11) cho provenance
+  thay vì dựng lại UI riêng. **Đây là view UI cuối cùng trong checklist
+  đề bài gốc — cả 2 màn Data Sources + Production Lines đã có code VÀ đã
+  verify thật.**
+- **Đã hoàn tất toàn bộ Step 1–12** — không còn việc nào đang chờ máy có
+  Docker. Lần verify cuối cùng (từ 1 lần `git clone` sạch + `npm run
+  seed` + `scripts/final-check.sh`, xem entry "Verify cuối cùng trước
+  khi nộp bài" ở cuối file) còn phát hiện + sửa thêm 1 cạm bẫy nghiêm
+  trọng (thiếu `prisma migrate deploy` tự động lúc container khởi động —
+  cạm bẫy #12) mà mọi lần verify riêng lẻ trước đó (Step 6–10, đều chạy
+  trên cùng 1 Postgres volume tái sử dụng) chưa từng chạm tới.
 
 Backend là modular monolith NestJS, 5 module nghiệp vụ:
 
@@ -2170,10 +2197,14 @@ mới của Step 10).
 
 ### Step 11 — Data Sources UI — 2026-09-04
 
-**Trạng thái: build sạch (`tsc --noEmit`/`eslint`/`npm run build` đều
-sạch) — CHƯA tự click-test bằng mắt trên trình duyệt thật (máy này không
-có Docker, không tự chạy `docker compose up` để mở `http://localhost:3000`
-thật). Chỉ làm frontend — không sửa code backend nào.**
+**Trạng thái: HOÀN TẤT, đã click-test + verify THẬT trên Docker thật —
+xem entry "Verify cuối cùng trước khi nộp bài" ở cuối file cho bằng
+chứng đầy đủ (`scripts/final-check.sh` 24/24 PASS + verify từ 1 lần
+`git clone` sạch).** (Lúc viết entry này, dòng trạng thái ghi "build
+sạch... CHƯA tự click-test bằng mắt trên trình duyệt thật" — đã lỗi thời
+từ khi đó, sau khi phát hiện + sửa 3 bug qua test tay, xem entry "Step 11
+— bổ sung..." ngay bên dưới.) Chỉ làm frontend ở lượt viết code ban đầu
+— không sửa code backend nào.
 
 **Audit trước khi code:**
 - `frontend/` là Next.js 16.3.4 + React 19.2.8, **App Router**
@@ -2371,10 +2402,10 @@ thật). Chỉ làm frontend — không sửa code backend nào.**
 
 ### Step 11 — bổ sung 3 fix sau khi test tay UI thật — 2026-09-04
 
-**Trạng thái: build/test sạch offline (`tsc --noEmit`/`eslint`/`npm run
-test`/`npm run build` cho cả 2 workspace) — máy này KHÔNG có Docker nên
-KHÔNG tự re-test lại 3 fix này bằng mắt; người dùng cần tự click lại trên
-máy có Docker.**
+**Trạng thái: HOÀN TẤT, 3 fix đã re-test PASS thật trên Docker thật —
+xem entry "Verify cuối cùng trước khi nộp bài" ở cuối file.** (Lúc viết
+entry này, dòng trạng thái ghi "build/test sạch offline... KHÔNG tự
+re-test lại 3 fix này bằng mắt" — đã lỗi thời từ khi đó.)
 
 Sau khi tự click-test tay đủ luồng trên máy có Docker (theo checklist
 "Việc cần làm ở máy có Docker", mục Step 11 bên dưới), phát hiện 3 vấn đề
@@ -2648,10 +2679,14 @@ repo vẫn sạch sau khi điều tra):**
 
 ### Step 12 — Production Lines UI — 2026-09-04
 
-**Trạng thái: build sạch (`tsc --noEmit`/`eslint`/`npm run build` đều
-sạch) — CHƯA tự click-test bằng mắt trên trình duyệt thật (máy này không
-có Docker). Chỉ làm frontend — không sửa code backend nào. Đây là view UI
-cuối cùng còn thiếu theo checklist đề bài gốc.**
+**Trạng thái: HOÀN TẤT, đã click-test + verify THẬT trên Docker thật —
+xem entry "Verify cuối cùng trước khi nộp bài" ở cuối file (B002
+Block/Resume/Add note, B006 Acknowledge exception, tất cả PASS thật qua
+`scripts/final-check.sh`).** (Lúc viết entry này, dòng trạng thái ghi
+"build sạch... CHƯA tự click-test bằng mắt trên trình duyệt thật" — đã
+lỗi thời từ khi đó.) Chỉ làm frontend ở lượt viết code ban đầu — không
+sửa code backend nào. Đây là view UI cuối cùng theo checklist đề bài
+gốc — cả 2 màn Data Sources + Production Lines đã HOÀN TẤT.
 
 **Audit trước khi code:** đọc lại `frontend/app/sources/[id]/page.tsx`
 (Step 11) để giữ đúng 3 quy ước đã có: `frontend/lib/api.ts` là nơi DUY
@@ -2886,33 +2921,118 @@ mới nhất:
       "Select" không có xác nhận thành công. Cả 3 đã sửa offline (backend
       `tsc`/`eslint`/`npm run test` sạch, frontend `tsc`/`eslint`/`npm run
       build` sạch) — xem entry đó cho chi tiết đầy đủ.
-- [ ] **Step 11 — chưa re-test lại 3 fix trên, cần máy có Docker.**
-      `docker compose up -d --build` (build lại image backend/frontend
-      với code vừa sửa). Nếu DB dev đã có sẵn dữ liệu cũ: áp dụng 1 trong
-      3 cách xử lý Source "Supplier Portal (fixture)" liệt kê trong entry
-      "Step 11 — bổ sung..." (xoá tay + tạo lại qua UI, hoặc UPDATE tay,
-      hoặc truncate + `npm run seed` lại — `npm run seed` KHÔNG idempotent,
-      xem entry đó). Xác nhận lại: Source `Supplier Portal` (seed mới,
-      nếu re-seed) Verify/Discover/Run collection thành công thật qua
-      `http://supplier-portal:4200`; thử 1 kịch bản thiếu env var (ví dụ
-      chưa set `PRODUCTION_DB_PASSWORD`) → UI hiện đúng message thật,
-      không còn "Internal server error"; bấm Select → thấy dòng xanh xác
-      nhận. Sau khi re-test xong: sửa lại đúng entry "Step 11 — bổ sung..."
-      (đổi trạng thái + dán bằng chứng thật), rồi mới đề xuất commit
-      message thứ 2 cho phần verify.
-- [ ] **Step 12 — chưa click-test, cần máy có Docker.** Frontend
-      Production Lines UI (`app/production-lines/page.tsx`) đã build
-      sạch offline (`tsc --noEmit`/`eslint`/`npm run build`, xem entry
-      "Step 12" bên trên) nhưng CHƯA tự click qua bằng mắt trên trình
-      duyệt thật. `docker compose up -d --build`, mở
-      `http://localhost:3000/production-lines`, tự test tay ít nhất 1
-      lần: xem đúng dữ liệu B002 (đã biết trước từ các lần test/seed —
-      `IN_PROGRESS`, `currentStation: RECEIVING`); thử Block → Resume 1
-      batch (nhập `actor`, xem dòng xanh + số liệu tự refresh); thử Add
-      note; nếu có batch đang CONFLICT (chạy collection B006 qua Data
-      Sources trước để tạo exception — xem README's B006 fixture ở Step
-      3/5) thử Acknowledge exception (nút chỉ hiện khi có
-      `qualityIndicators`). Sau khi test tay xong: sửa lại đúng entry
-      "Step 12" (đổi trạng thái "CHƯA click-test" → xác nhận đã tự test
-      tay thật + ghi rõ kết quả/bug nếu có), rồi mới đề xuất commit
-      message thứ 2 cho phần verify.
+- [x] **Step 11 — đã re-test lại 3 fix, PASS thật trên Docker thật.**
+      `docker compose up -d --build`, `npm run seed` trên DB sạch — Source
+      `Supplier Portal` có đúng `config.baseUrl = "http://supplier-portal:4200"`
+      (không còn `127.0.0.1`/ephemeral). Verify/Discover/Run collection
+      thành công thật qua địa chỉ này. Kịch bản thiếu env var/chưa
+      `selectedTable` → UI/API hiện đúng message thật (400 rõ ràng), không
+      còn "Internal server error". Select → hiện dòng xanh xác nhận. Bằng
+      chứng đầy đủ nằm trong `bash scripts/final-check.sh`'s lần chạy PASS
+      24/24 (xem mục "Verify cuối cùng trước khi nộp bài" bên dưới cho
+      tóm tắt, và file log cục bộ `final-check-*.log` cho log đầy đủ —
+      file này KHÔNG nằm trong git, chỉ tồn tại trên máy đã chạy script).
+- [x] **Step 12 — đã click-test, PASS thật trên Docker thật.** Frontend
+      Production Lines UI (`app/production-lines/page.tsx`) đã tự test tay
+      trên `http://localhost:3000/production-lines`: dữ liệu B002 đúng
+      (`IN_PROGRESS`, `currentStation: RECEIVING`); Block → Resume 1 batch
+      thành công (dòng xanh + số liệu tự refresh); Add note thành công;
+      B006 (CONFLICT có sẵn ngay sau `npm run seed`, không cần chạy
+      collection nào) hiện đúng nút "Acknowledge exception" (chỉ hiện khi
+      có `qualityIndicators`) và bấm thành công. Bằng chứng đầy đủ qua
+      `scripts/final-check.sh` (ack-exception + xác nhận B006 vẫn
+      CONFLICT sau ack) — xem "Verify cuối cùng trước khi nộp bài" bên
+      dưới.
+
+## Verify cuối cùng trước khi nộp bài — 2026-09-05
+
+**Trạng thái: PASS thật, từ 1 lần `git clone` sạch, trên máy có Docker.**
+Đây là lần verify DUY NHẤT trong toàn bộ quá trình làm bài mô phỏng đúng
+trải nghiệm người chấm (clone mới, không phải máy dev đã tích luỹ state
+qua hàng chục lần `docker compose up`) — và đúng lần này phát hiện ra 1
+cạm bẫy nghiêm trọng đã tồn tại từ Step 2 mà không lần verify nào trước
+đó (kể cả Step 6–10's script verify riêng) từng chạm tới.
+
+**Cạm bẫy #12 — KHÔNG có gì tự động chạy `prisma migrate deploy` lúc
+container `backend` khởi động:**
+- Từ Step 2 tới hết Step 12, mọi lần verify Docker đều chạy trên CÙNG 1
+  Postgres volume (`postgres_data`) đã được `npx prisma migrate deploy`
+  ĐÚNG 1 LẦN thủ công từ rất sớm, rồi tái sử dụng qua hàng chục lần
+  `docker compose up` sau đó (container Postgres restart giữ nguyên
+  volume, không mất schema). `backend/Dockerfile`'s `CMD ["node",
+  "dist/main.js"]` và `docker-compose.yml`'s service `backend` (trước
+  fix) đều KHÔNG có bước migrate nào — ứng dụng chỉ đơn giản kết nối vào
+  1 DB đã sẵn schema đúng từ trước, không tự tạo ra nó.
+- Cạm bẫy này VÔ HÌNH suốt toàn bộ quá trình vì không ai từng thật sự thử
+  `docker compose down -v` (xoá volume) rồi `up` lại từ đầu — cho tới lần
+  verify cuối cùng này, khi người dùng tự tay mô phỏng đúng
+  `git clone` sang thư mục MỚI (repo Git, không có volume Docker cũ nào
+  đi kèm) + `docker compose up -d --build`. Đây CHÍNH XÁC là kịch bản
+  người chấm sẽ gặp khi clone repo lần đầu: nếu cạm bẫy này không bị bắt
+  ở đây, `GET /sources` (và mọi route chạm Prisma khác) sẽ 500 ngay lập
+  tức vì bảng chưa tồn tại.
+- **Fix**: thêm `command: sh -c "npx prisma migrate deploy && node
+  dist/main.js"` vào service `backend` trong `docker-compose.yml` — ngang
+  hàng với `build`/`container_name`/`restart` (SIBLING key, KHÔNG lồng
+  trong `build:`). Cạm bẫy gặp phải lúc thêm dòng này lần đầu (ghi lại để
+  không ai lặp lại): đặt nhầm `command` vào bên trong khối `build:` báo
+  lỗi Compose schema `services.backend.build Additional property
+  'command' is not allowed` — `command` phải là 1 key riêng của service,
+  không phải của `build`. Đã xác nhận cú pháp YAML hợp lệ bằng
+  `js-yaml` (`node -e "require('js-yaml').load(...)"`, có sẵn trong
+  `node_modules` của cả 2 workspace) — parse thành công, `backend.command`
+  đúng giá trị, không lồng nhầm trong `build`.
+- Sau khi thêm fix, người dùng đã tự tay verify lại đúng luồng clone sạch
+  (dán nguyên văn, không tóm tắt):
+  1. `docker compose down -v` (bản gốc) + `git clone` sang thư mục mới +
+     `docker compose up -d --build` — PASS, cả 5 service healthy, log
+     xác nhận backend tự chạy `prisma migrate deploy` thành công trước
+     khi `node dist/main.js` start.
+  2. `curl /health` → `{"status":"ok","db":true}`.
+  3. `curl /sources` → `[]` (đúng — chưa seed).
+  4. `cp backend/.env.example backend/.env` + `cd backend && npm run
+     seed` → thành công.
+  5. `curl /sources` → đúng 3 Source (`Production Database`,
+     `Application API`, `Supplier Portal` — `Supplier Portal` có
+     `baseUrl: http://supplier-portal:4200` đúng, không còn
+     `127.0.0.1`/ephemeral — xác nhận lại fix của Step 11 "bổ sung" vẫn
+     đứng vững qua 1 lần seed hoàn toàn mới).
+
+**`bash scripts/final-check.sh` — PASS 24/24 check (chạy trên bản gốc,
+không phải lần clone sạch ở trên — 2 lần chạy độc lập, cùng cho kết quả
+nhất quán):**
+```
+TOTAL_CHECKS=24 FAILED_CHECKS=0
+CONCLUSION: PASS (0/24 checks failed)
+```
+Tóm tắt theo đúng 11 stage của script (log đầy đủ nằm trong
+`final-check-<timestamp>.log` ở gốc repo — **file này KHÔNG nằm trong
+git** (`.gitignore` không cần chỉnh vì đây là output cục bộ của script
+tự chạy, không phải file cần commit), chỉ tồn tại trên máy đã chạy script
+đó; không giả vờ như nó có sẵn trong repo này):
+- [0] Fresh state: `docker compose down -v` + `up -d --build` + backend
+  trả 200 trên `/health` trong 90s — PASS.
+- [1] `npm run seed` — exit 0 — PASS.
+- [2] `GET /sources`: Source `Supplier Portal` tồn tại,
+  `config.baseUrl === "http://supplier-portal:4200"` — PASS.
+- [3] Verify + Run collection thật trên `Supplier Portal` — status
+  `SUCCESS` — PASS.
+- [4] DATABASE source thiếu `selectedTable` → `POST /collection-runs`
+  trả đúng HTTP 400 với message thật (chứa "selectedTable", KHÔNG phải
+  "Internal server error") — PASS (3 check con).
+- [5] `GET /production-lines`: B006 có `qualityIndicators` không rỗng,
+  `acknowledged: false` (fresh từ seed) — PASS.
+- [6] `POST /management-events/ack-exception` cho B006 → 201 — PASS.
+- [7] `GET /production-lines` lại: B006 giờ `acknowledged: true` — PASS.
+- [8] `GET /canonical-events?batchId=B006`: vẫn có event `status:
+  CONFLICT` (Rule 5b — ack không đổi canonical status) — PASS.
+- [9] `GET /production-lines`: B004 (`batch-scenarios.ts`'s "WASHING
+  reached first, RECEIVING arrives late") có `missingStations` không
+  rỗng — PASS.
+- [10] Trên B002: Block → Resume → Add note, cả 3 đều 201 — PASS.
+
+Toàn bộ checklist "Việc cần làm ở máy có Docker" phía trên đã tick `[x]`
+hết — không còn mục nào chưa verify. Mục này (verify từ 1 lần `git clone`
+sạch + `final-check.sh` 24/24) là lần verify TOÀN DIỆN NHẤT, bao trùm lại
+mọi Step riêng lẻ đã tick ở trên, không phải 1 mục checklist riêng thêm
+nữa.

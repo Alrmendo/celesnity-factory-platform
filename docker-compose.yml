@@ -21,9 +21,22 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
-    command: sh -c "npx prisma migrate deploy && node dist/main.js"
     container_name: celesnity-backend
     restart: unless-stopped
+    # Runs the real, committed migration history (backend/prisma/migrations/,
+    # baselined in Step 6 — see README's "Step 6 — HOÀN TẤT" entry) against
+    # whatever Postgres this container's DATABASE_URL points at, every time
+    # the container starts, BEFORE the app itself starts. Without this,
+    # nothing anywhere ever applied a migration on a fresh DB — every prior
+    # verification ran against a Postgres volume that had already been
+    # migrated once by hand and then reused across dozens of `docker
+    # compose up` runs, so the gap stayed invisible until the first real
+    # `docker compose down -v` (clean-clone simulation) — see README's
+    # final pre-submission entry for the full incident. `command:` must be
+    # a top-level key of the `backend:` service, NOT nested under `build:`
+    # (that specific mistake fails with "services.backend.build Additional
+    # property 'command' is not allowed").
+    command: sh -c "npx prisma migrate deploy && node dist/main.js"
     environment:
       PORT: 3001
       DB_HOST: postgres
