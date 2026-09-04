@@ -48,6 +48,15 @@ export class SourcesService {
     return this.toResponse(source);
   }
 
+  // Step 10: Data Sources view needs a list, not just single-source lookup.
+  // Same sanitization as findOne/create — never returns a raw secret.
+  async findAll(): Promise<SourceResponse[]> {
+    const sources = await this.prisma.source.findMany({
+      orderBy: { createdAt: 'asc' },
+    });
+    return sources.map((source) => this.toResponse(source));
+  }
+
   /**
    * "Register and verify [the source] before use" — Step 7 (DATABASE): a
    * real `SELECT 1` against the target DB. Step 8 (CRAWLER): a real GET

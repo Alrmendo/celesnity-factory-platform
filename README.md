@@ -50,6 +50,12 @@ lập bằng `docker compose up` như trên máy local bình thường.
   tồn tại trong repo — đã xác nhận lại) lẫn trong đề bài gốc (PDF, mục
   "Management Events" chỉ liệt kê 4 hành động bắt buộc, không có route/
   request shape). Xem entry "Step 9" trong Nhật ký triển khai bên dưới.
+- Route đọc cho UI (Step 10) — `GET /canonical-events` (preview
+  "normalized record" kèm provenance) thay vì `GET /source-records` như
+  gợi ý trong prompt Step 10, và `GET /production-lines` trả toàn bộ line
+  trong 1 lần gọi thay vì `GET /lines/:id/status` theo từng line — cả hai
+  đều là thiết kế tự đặt ra, prompt cho phép "hoặc endpoint tương đương".
+  Xem entry "Step 10" trong Nhật ký triển khai bên dưới.
 
 ## Trạng thái hiện tại
 
@@ -109,19 +115,30 @@ không lặp lại ở đây.
   `timestamp` thật. Logic derive `acknowledged` (Rule 5b) và đọc
   `management_events` cho batch state (Rule 7 — BLOCKED) **đã có sẵn từ
   Step 5**, không phải code mới — Step 9 chỉ thêm phần GHI còn thiếu.
+- Step 10 (code xong, **verify OFFLINE pass — CHƯA verify Docker thật**,
+  máy này không có Docker; xem entry "Step 10" bên dưới): read API cho UI
+  — `GET /sources` (list), `GET /collection-runs?sourceId=` (lịch sử +
+  duration), `GET /canonical-events?batchId=&sourceId=&collectionRunId=`
+  (preview normalized record + provenance), `GET /production-lines`
+  (rollup theo line/station, WIP, freshness — tái sử dụng nguyên
+  `ProductionDomainService.getBatchStatus`, không viết lại logic domain).
+  `STALE_THRESHOLD_MINUTES` (env var, default 15) giờ configurable. Chỉ
+  backend — chưa có code frontend.
 - **Chưa làm**: UI (2 màn Data Sources + Production Lines) — bước tiếp
-  theo sau Step 9.
+  theo sau Step 10.
 
 Backend là modular monolith NestJS, 5 module nghiệp vụ:
 
-- `SourcesModule` — `POST /sources`, `GET /sources/:id` (Step 6); `POST
-  /sources/:id/verify`, `GET /sources/:id/discover` (Step 7 DATABASE +
-  Step 8 CRAWLER, dispatch theo `source.type` trong `SourcesService`),
-  `POST /sources/:id/select` (Step 7, DATABASE only — CRAWLER không có
-  bước select vì chỉ có đúng 1 deliveries feed, không có gì để chọn); config
-  JSON không bao giờ chứa secret literal, sanitize thêm 1 lớp phòng thủ ở
-  response (xem `sanitize-config.ts`)
+- `SourcesModule` — `POST /sources`, `GET /sources` (list, Step 10), `GET
+  /sources/:id` (Step 6); `POST /sources/:id/verify`, `GET
+  /sources/:id/discover` (Step 7 DATABASE + Step 8 CRAWLER, dispatch theo
+  `source.type` trong `SourcesService`), `POST /sources/:id/select` (Step
+  7, DATABASE only — CRAWLER không có bước select vì chỉ có đúng 1
+  deliveries feed, không có gì để chọn); config JSON không bao giờ chứa
+  secret literal, sanitize thêm 1 lớp phòng thủ ở response (xem
+  `sanitize-config.ts`)
 - `CollectionRunsModule` — `POST /collection-runs`, `GET
+  /collection-runs?sourceId=` (lịch sử + `durationMs`, Step 10), `GET
   /collection-runs/:id` (Step 6); reuse nguyên
   `CanonicalizationService.ingestBatch` để insert + recompute. Dispatch
   theo `source.type`: `API` → gọi fixture-api thật, có retry/backoff (Step
@@ -130,8 +147,13 @@ Backend là modular monolith NestJS, 5 module nghiệp vụ:
   pagination-loop protection, malformed row bị skip không fail run), gán
   cứng station RECEIVING, không retry (Step 8, đúng phạm vi đề bài —
   "Retry of transient failures" chỉ yêu cầu cho Application API)
-- `CanonicalizationModule` — có pipeline Rule 1–5b + wiring Prisma thật
-- `ProductionDomainModule` — có logic Rule 6–7 + wiring Prisma thật
+- `CanonicalizationModule` — có pipeline Rule 1–5b + wiring Prisma thật;
+  `GET /canonical-events?batchId=&sourceId=&collectionRunId=` (Step 10) —
+  preview canonical event kèm provenance (source_records → sources)
+- `ProductionDomainModule` — có logic Rule 6–7 + wiring Prisma thật; `GET
+  /production-lines` (Step 10, `ProductionLinesController` mới) — rollup
+  theo line (từ `WorkOrder.lineId`, không phải bảng `lines`), per-station
+  WIP, tái sử dụng `getBatchStatus` không sửa
 - `ManagementEventsModule` — `POST /management-events/block|resume|
   ack-exception|note` (Step 9), append-only (chỉ `.create()`), luôn gắn
   `organizationId` (seeded, `SEED_ORGANIZATION_ID`)/`actor` (từ caller)/
@@ -1656,6 +1678,239 @@ Ghi chú: cảnh báo `Jest did not exit one second after the test run has
 completed... Consider running Jest with --detectOpenHandles` vẫn xuất
 hiện (đã ghi nhận từ Step 6, chưa điều tra) — không chặn tiến độ.
 
+### Step 10 — 2026-09-04
+
+**Trạng thái: code xong, verify OFFLINE pass — CHƯA verify Docker/`test:e2e`
+thật (máy này không có Docker, xem "Vấn đề gặp phải" bên dưới cho bằng
+chứng đã thử chạy). Step 10 CHỈ làm backend (read API cho UI) — không có
+code frontend.**
+
+**Audit trước khi code (grep toàn bộ `*.controller.ts`) — kết quả:**
+
+Đã có sẵn từ Step 1–9:
+- `POST /sources`, `GET /sources/:id`, `POST /sources/:id/verify`, `GET
+  /sources/:id/discover`, `POST /sources/:id/select` (`SourcesController`).
+- `POST /collection-runs`, `GET /collection-runs/:id`
+  (`CollectionRunsController`).
+- `POST /management-events/block|resume|ack-exception|note`
+  (`ManagementEventsController`).
+- `GET /health` (`HealthModule`, Step 1).
+- `CanonicalizationController` (`@Controller('canonicalization')`) và
+  `ProductionDomainController` (`@Controller('production-domain')`) **tồn
+  tại nhưng hoàn toàn RỖNG** — 0 route đăng ký ở cả hai, nguyên trạng từ
+  Step 1.
+
+Còn thiếu (đối chiếu danh sách UI cần trong prompt Step 10) — KHÔNG có
+route nào tương đương đã tồn tại cho: list toàn bộ Source (`GET /sources`
+chỉ có `:id`), lịch sử collection run theo source kèm duration, preview
+canonical event kèm provenance, rollup theo Production Line, và
+`STALE_THRESHOLD_MINUTES` configurable (code cũ hardcode default 15 phút
+ngay trong `ProductionDomainService`, không đọc từ env ở đâu cả — xác nhận
+qua grep `STALE_THRESHOLD`).
+
+**Đã làm — endpoint mới + shape response (tài liệu tham chiếu cho Step
+11–12, frontend):**
+
+1. `GET /sources` (`SourcesController`/`SourcesService.findAll`, mới) —
+   list toàn bộ Source, sanitize giống hệt `GET /sources/:id` (không lộ
+   secret):
+   ```json
+   [{
+     "id": "uuid", "name": "string", "type": "API|DATABASE|CRAWLER|MQTT",
+     "config": { "...sanitized, secret bị [REDACTED]" },
+     "verifiedAt": "ISO date | null", "createdAt": "ISO date", "updatedAt": "ISO date"
+   }]
+   ```
+
+2. `GET /collection-runs?sourceId=` (`CollectionRunsController`, mới —
+   `sourceId` optional, bỏ trống trả toàn bộ) — lịch sử collection run,
+   mới nhất trước (`startedAt desc`), thêm `durationMs` (không có cột
+   sẵn, tính từ `finishedAt - startedAt`, `null` khi còn RUNNING):
+   ```json
+   [{
+     "id": "uuid", "sourceId": "uuid", "status": "RUNNING|SUCCESS|FAILED",
+     "startedAt": "ISO date", "finishedAt": "ISO date | null",
+     "durationMs": "number | null", "recordsRead": "number",
+     "errorCount": "number", "errorMessage": "string | null"
+   }]
+   ```
+   Không có cột nào secret-shaped trên `collection_runs` (giống lý do
+   comment sẵn ở `findOne`) nên không cần sanitize thêm.
+
+3. `GET /canonical-events?batchId=&sourceId=&collectionRunId=`
+   (repurpose `CanonicalizationController`, trước đó hoàn toàn rỗng — đổi
+   route từ `/canonicalization` sang `/canonical-events`, an toàn vì chưa
+   ai/test nào từng gọi route cũ) — preview "normalized record" (=
+   `canonical_events`, kết quả Rule 2/5) kèm đầy đủ provenance (nguồn nào,
+   collection run nào tạo ra từng source record đã góp vào event đó):
+   ```json
+   [{
+     "id": "uuid", "batchId": "B006", "station": "DISPATCH", "quantity": 480,
+     "eventTime": "ISO date", "status": "ACCEPTED|CONFLICT",
+     "canonicalKey": "B006:DISPATCH", "updatedAt": "ISO date",
+     "sources": [{
+       "relationship": "PRIMARY|DUPLICATE|SUPERSEDED|CONFLICT",
+       "sourceRecordPk": "uuid", "sourceRecordId": "string (business id)",
+       "sourceId": "uuid", "sourceName": "string", "sourceType": "API|DATABASE|CRAWLER|MQTT",
+       "collectionRunId": "uuid", "eventTime": "ISO date", "receivedAt": "ISO date"
+     }]
+   }]
+   ```
+
+4. `GET /production-lines` (controller mới `ProductionLinesController`,
+   mount trong `ProductionDomainModule` cạnh `ProductionDomainController`
+   đã rỗng có sẵn) — rollup theo line, tái sử dụng NGUYÊN
+   `ProductionDomainService.getBatchStatus` (Step 4/5, không sửa 1 dòng)
+   cho từng batch — route này chỉ tổng hợp/group, không có logic domain
+   mới nào:
+   ```json
+   [{
+     "lineId": "LINE-1",
+     "stations": [
+       { "station": "RECEIVING", "wip": 1, "batchIds": ["B002"] },
+       { "station": "SORTING", "wip": 3, "batchIds": ["B005B", "B007", "B007-resume"] },
+       "...đủ 6 trạm theo STATION_ORDER..."
+     ],
+     "batches": [{
+       "batchId": "B002", "workOrderId": "WO-B002",
+       "state": "PLANNED|IN_PROGRESS|BLOCKED|COMPLETED",
+       "currentStation": "RECEIVING|SORTING|WASHING|DRYING|FOLDING|DISPATCH|null",
+       "completedQuantity": "number | null",
+       "missingStations": ["SORTING", "..."],
+       "freshnessStatus": "NO_DATA|OK|STALE", "freshnessMinutes": "number | null",
+       "qualityIndicators": [{ "code": "string", "acknowledged": "boolean" }]
+     }]
+   }]
+   ```
+   `wip` (per station) = số batch có `currentStation` = trạm đó VÀ
+   `state !== 'COMPLETED'` — dùng đúng field `state`/`currentStation` đã
+   có sẵn từ Rule 6/7, không tự suy diễn định nghĩa WIP mới.
+   `lineId` là tập giá trị duy nhất của `WorkOrder.lineId` — cột này
+   KHÔNG có quan hệ Prisma thật tới bảng `Line`/`lines` (xem
+   `schema.prisma`: `lineId String @map("line_id")`, không `@relation`),
+   nên không liệt kê từ bảng `lines` (hiện chưa ai insert dữ liệu vào đó
+   ở bất kỳ step nào). `batchId` chính là "ID để link tới source records +
+   collection run liên quan" mà đề bài yêu cầu — dùng thẳng làm query
+   param cho `GET /canonical-events?batchId=<id>` ở mục 3, không cần thêm
+   ID nào khác.
+
+5. `STALE_THRESHOLD_MINUTES` (env var mới, optional, default 15) — đọc
+   qua `ConfigService` ngay trong `ProductionLinesController`, truyền
+   tường minh vào `getBatchStatus(batchId, now, staleThresholdMinutes)`
+   cho mỗi batch. KHÔNG sửa default cứng 15 phút sẵn có trong
+   `ProductionDomainService` (`DEFAULT_STALE_THRESHOLD_MINUTES`, dùng khi
+   gọi method trực tiếp không qua HTTP, ví dụ trong test) — chỉ thêm 1
+   lớp đọc-từ-env ở tầng controller, đúng yêu cầu "must be configurable".
+   Thêm vào `backend/.env.example`, root `.env.example`, và
+   `docker-compose.yml`'s `backend.environment`.
+
+**Vấn đề gặp phải:**
+- Gọi `npx eslint "{src,apps,libs,test}/**/*.ts"` trực tiếp qua Bash tool
+  ở máy này báo lỗi "No files matching the pattern" (glob brace-expansion
+  không match) — nhưng `npm run lint` (chạy đúng cùng 1 lệnh, qua npm
+  script) chạy sạch, không lỗi nào. Chưa rõ nguyên nhân khác biệt giữa 2
+  cách gọi (nghi ngờ cách Bash tool ở môi trường này tokenize `{...}`
+  khác lúc npm tự spawn shell) — không ảnh hưởng gì vì `npm run lint` mới
+  là lệnh thật cần chạy (đúng script đã định nghĩa trong
+  `package.json`), dùng nó thay vì gọi `npx` trực tiếp cho các step sau.
+- `npm run test:e2e` **không chạy được ở máy này** — không có Docker,
+  đúng như lưu ý môi trường đầu bài. Đã CHỦ ĐỘNG thử chạy để xác nhận lỗi
+  không phải do code mới: **cả 7 suite** (6 suite cũ đã pass thật ở Step
+  6–9 trên Docker + `read-api.e2e-spec.ts` mới của Step 10) fail với
+  ĐÚNG 1 lý do duy nhất, giống hệt nhau:
+  ```
+  PrismaClientInitializationError: Can't reach database server at `localhost:5433`
+  Please make sure your database server is running at `localhost:5433`.
+  ```
+  Không có lỗi biên dịch/type/import nào ở bất kỳ suite nào, kể cả
+  `read-api.e2e-spec.ts` — xác nhận code Step 10 không có lỗi cấu trúc,
+  chỉ đơn thuần CHƯA verify được hành vi thật vì thiếu Postgres. Đúng
+  theo yêu cầu đầu bài: ghi rõ "chưa verify — cần máy có Docker" thay vì
+  suy đoán kết quả.
+
+**Quyết định phát sinh:**
+- Route `/canonical-events` (không phải `/source-records` như gợi ý
+  trong prompt) — "normalized record" đề bài nhắc tới chính là
+  `canonical_events` (kết quả Rule 2/5 sau khi resolve), không phải
+  `source_records` thô; route đặt tên đúng resource này, khớp câu
+  "hoặc endpoint tương đương" trong prompt.
+- `GET /production-lines` trả TẤT CẢ line trong 1 lần gọi (không chọn
+  phương án `GET /lines/:id/status` cho từng line riêng đề bài gợi ý) —
+  UI "Production Lines view" nhiều khả năng cần liệt kê toàn bộ line cùng
+  lúc khi mở màn hình; 1 endpoint duy nhất đơn giản hơn cho frontend so
+  với việc phải biết trước danh sách lineId để gọi N lần.
+- `GET /production-lines` dùng `new Date()` thật tại thời điểm gọi (không
+  nhận tham số `now` qua query) — khác `getBatchStatus` (Step 4) vốn nhận
+  `now` tường minh để test được xác định; đây là 1 dashboard sống, luôn
+  cần "freshness tính tới hiện tại", không phải 1 lần gọi cố định. Hệ quả
+  trực tiếp cho test: test Step 10 của endpoint này KHÔNG assert cứng
+  `freshnessStatus` theo timeline `T0` cố định của `batch-scenarios.ts`
+  (T0 = năm 2026-01-01, xa thời điểm chạy test thật bất kỳ lúc nào) — chỉ
+  assert `state`/`currentStation`/WIP per-station (không phụ thuộc "now")
+  bằng fixture B001–B008 có sẵn; freshness/`STALE_THRESHOLD_MINUTES` được
+  test riêng bằng 1 batch có `eventTime` tính tương đối theo `Date.now()`
+  thật lúc test chạy, không dùng `T0`.
+- KHÔNG sửa `ProductionDomainService`/`batch-state.ts`/`freshness.ts`/
+  `canonicalization.service.ts` — mọi endpoint mới ở Step 10 chỉ gọi lại
+  service/hàm đã có (Step 3–5), đúng yêu cầu "chỉ tổng hợp/serialize để
+  expose qua API, KHÔNG viết lại logic domain".
+
+**Test bắt buộc — `backend/test/read-api.e2e-spec.ts` (mới, DB thật,
+CHƯA chạy được — xem "Vấn đề gặp phải"):** happy-path cho cả 4 endpoint
+mới, dùng lại đúng fixture B001–B008 (`buildBatchScenarios`) — không bịa
+scenario mới:
+- `GET /sources` — tạo 1 source API + 1 source DATABASE (cố tình đưa
+  `password` literal vào config để xác nhận `sanitizeSourceConfig` vẫn
+  redact đúng qua route list mới, không chỉ qua `:id`), assert đủ 2 source
+  trả về, `passwordEnvVar` hiển thị nhưng `password` bị `[REDACTED]`.
+- `GET /collection-runs?sourceId=` — 1 run SUCCESS đã `finishedAt` (assert
+  `durationMs` = 5000) + 1 run RUNNING chưa `finishedAt` (assert
+  `durationMs: null`) trên cùng source, + 1 run của source KHÁC (assert bị
+  lọc ra, không xuất hiện), assert thứ tự mới nhất trước.
+- `GET /canonical-events?batchId=B006` — ingest fixture B006 thật
+  (DISPATCH CONFLICT, 2 nguồn khác tier... cùng tier — DATABASE+API cùng
+  Tier 1), assert `status: CONFLICT`, đủ 2 `sources[]` cùng
+  `relationship: CONFLICT` (đúng Rule 5.4), tên nguồn đúng
+  `Application API`/`Production Database`; + 1 assertion lọc theo
+  `sourceId` xác nhận đúng batch B006 vẫn xuất hiện.
+- `GET /production-lines` — ingest đủ 10 scenario B001–B008 (đều
+  `lineId: 'LINE-1'`), assert 1 line duy nhất, `batches.length === 10`,
+  WIP per-station đúng theo `state`/`currentStation` đã biết trước từ
+  `batch-lifecycle.e2e-spec.ts`'s `scenarioExpectations` (RECEIVING: 1
+  [B002]; SORTING: 3 [B005B, B007, B007-resume]; WASHING: 3 [B003, B004,
+  B005A]; DRYING/FOLDING: 0; DISPATCH: 1 [B006] — **B008 KHÔNG tính** dù
+  `currentStation=DISPATCH` vì `state=COMPLETED`).
+- `STALE_THRESHOLD_MINUTES` — 1 test riêng (describe block riêng, set
+  `process.env.STALE_THRESHOLD_MINUTES='1'` TRƯỚC khi compile
+  `TestingModule`, đúng pattern `collection-runs.e2e-spec.ts` đã dùng cho
+  `FIXTURE_API_KEY`): 1 batch có `eventTime` = 2 phút trước lúc test
+  chạy, assert `freshnessStatus: STALE` dưới threshold 1 phút (mặc định
+  15 phút sẽ ra `OK`) — chứng minh giá trị env thật sự được đọc, không
+  chỉ code có tồn tại tham số. `afterAll` restore lại
+  `process.env.STALE_THRESHOLD_MINUTES` về giá trị cũ — `jest-e2e.json`
+  ghim `maxWorkers: 1` nên các file e2e chạy cùng 1 process, không restore
+  sẽ rò rỉ sang suite chạy sau (đúng bài học đã ghi ở Step 6's secret-key
+  leak).
+
+**Verify OFFLINE (không cần Docker/Postgres — chỉ cần Node):**
+- `npx tsc --noEmit` sạch toàn repo (không output, exit 0).
+- `npm run lint` (`eslint --fix`) sạch toàn repo, không output, exit 0.
+- `npm run test`: vẫn 22/22 pass, không case nào mới (mọi test Step 10 đều
+  đụng DB thật nên nằm ở `test:e2e`) — dán nguyên output:
+  ```
+  PASS src/modules/production-domain/freshness.spec.ts
+  PASS src/modules/canonicalization/canonicalization.pipeline.spec.ts
+  PASS src/modules/production-domain/batch-state.spec.ts
+  PASS src/app.controller.spec.ts
+
+  Test Suites: 4 passed, 4 total
+  Tests:       22 passed, 22 total
+  ```
+- `npm run test:e2e` — **chưa verify, cần máy có Docker.** Đã thử chạy
+  (xem "Vấn đề gặp phải" ở trên cho log đầy đủ): 7/7 suite fail cùng 1 lý
+  do `Can't reach database server at localhost:5433`, không có lỗi
+  code/biên dịch nào.
+
 ## Việc cần làm ở máy có Docker
 
 Checklist thủ công — làm ở máy laptop có Docker chạy được, sau khi pull code
@@ -1721,3 +1976,14 @@ mới nhất:
       đủ, gồm cả 3 lệnh gọi HTTP thật (BLOCK, RESUME sau BLOCK, và RESUME
       trên batch chưa từng bị block → 400 — validation quan trọng nhất
       của Step 9, xác nhận đúng bằng gọi thật, không chỉ qua Jest).
+- [ ] **Step 10 — chưa verify, cần máy có Docker.** Không có migration
+      Prisma mới (chỉ thêm route đọc + 1 env var mới
+      `STALE_THRESHOLD_MINUTES`). `docker compose up -d --build`, rồi
+      `npm run test:e2e` — kỳ vọng `read-api.e2e-spec.ts` pass đủ 5 test
+      (`GET /sources`, `GET /collection-runs?sourceId=`, `GET
+      /canonical-events?batchId=` + provenance, `GET /production-lines`
+      rollup WIP, `STALE_THRESHOLD_MINUTES` override) cộng toàn bộ 6 suite
+      cũ vẫn pass — tổng số liệu thật (không đoán trước, xem entry "Step
+      10" bên trên cho lý do máy này chưa chạy được). Sau khi có log thật:
+      sửa lại đúng entry "Step 10" (đổi trạng thái + dán log), rồi mới đề
+      xuất commit message thứ 2 cho phần verify.

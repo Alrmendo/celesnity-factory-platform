@@ -55,6 +55,10 @@ services:
       # a static env var, because the supplier portal needs no secret at
       # all (see collection-runs/types.ts's CrawlerSourceConfig). backend
       # still depends_on it below purely for startup ordering.
+      # Step 10: freshness threshold ("must be configurable") for GET
+      # /production-lines. Minutes since a batch's latest ACCEPTED
+      # eventTime before it's reported STALE.
+      STALE_THRESHOLD_MINUTES: ${STALE_THRESHOLD_MINUTES:-15}
     ports:
       - "3001:3001"
     depends_on:

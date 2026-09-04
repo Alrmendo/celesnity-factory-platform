@@ -11,6 +11,12 @@ export class SourcesController {
     return this.sourcesService.create(dto);
   }
 
+  // Step 10: Data Sources view — list all sources (sanitized, no secrets).
+  @Get()
+  findAll() {
+    return this.sourcesService.findAll();
+  }
+
   @Get(':id')
   findOne(@Param('id') id: string) {
     return this.sourcesService.findOne(id);
