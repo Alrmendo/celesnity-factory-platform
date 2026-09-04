@@ -267,6 +267,12 @@ export default function SourceDetailPage({
           {typeof current.config.selectedTable === 'string' && (
             <p>Bảng đang chọn hiện tại: {String(current.config.selectedTable)}</p>
           )}
+          {select.phase === 'success' && (
+            <p style={{ color: 'green' }}>
+              Select thành công: bảng &quot;{String(select.data.config.selectedTable)}
+              &quot; lúc {new Date(select.data.updatedAt).toLocaleString()}
+            </p>
+          )}
           {select.phase === 'error' && (
             <p style={{ color: 'red' }}>Select thất bại: {select.message}</p>
           )}

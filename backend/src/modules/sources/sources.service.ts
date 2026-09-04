@@ -190,7 +190,15 @@ export class SourcesService {
     const config = source.config as unknown as DatabaseSourceConfig;
     const password = this.config.get<string>(config.passwordEnvVar);
     if (!password) {
-      throw new Error(
+      // BadRequestException (not a plain Error): a plain Error propagates
+      // uncaught into Nest's default filter, which replaces its message
+      // with a generic "Internal server error" in the HTTP response (by
+      // design, to avoid leaking internals) — this is a caller/deployment
+      // config mistake (missing env var), not an unexpected internal fault,
+      // so the real reason should reach the client/UI. Found via real UI
+      // testing (Step 11's "bổ sung" entry) showing this exact message
+      // hidden behind a generic 500.
+      throw new BadRequestException(
         `Source ${source.id} references env var "${config.passwordEnvVar}" for its DB password, but it is not set`,
       );
     }

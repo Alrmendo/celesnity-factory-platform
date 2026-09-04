@@ -1,4 +1,9 @@
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  Logger,
+  NotFoundException,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { CollectionRun, Source } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
@@ -80,7 +85,11 @@ export class CollectionRunsService {
     if (!apiKey) {
       // Logs only the env var NAME (connectionConfig.apiKeyEnvVar), never a
       // value — there is no value to log, which is the point.
-      throw new Error(
+      // BadRequestException, not a plain Error — see sources.service.ts's
+      // resolveDatabaseConfig for why (a plain Error becomes a generic
+      // "Internal server error" on the wire, hiding this actionable
+      // message from the caller/UI).
+      throw new BadRequestException(
         `Source ${sourceId} references env var "${connectionConfig.apiKeyEnvVar}" for its API key, but it is not set`,
       );
     }
@@ -173,12 +182,13 @@ export class CollectionRunsService {
     const connectionConfig = source.config as unknown as DatabaseSourceConfig;
     const password = this.config.get<string>(connectionConfig.passwordEnvVar);
     if (!password) {
-      throw new Error(
+      // BadRequestException, not a plain Error — see runApiCollection above.
+      throw new BadRequestException(
         `Source ${sourceId} references env var "${connectionConfig.passwordEnvVar}" for its DB password, but it is not set`,
       );
     }
     if (!connectionConfig.selectedTable) {
-      throw new Error(
+      throw new BadRequestException(
         `Source ${sourceId} has no selectedTable configured — call POST /sources/${sourceId}/select first`,
       );
     }

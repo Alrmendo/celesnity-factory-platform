@@ -87,6 +87,13 @@ describe('Collector fault injection + secret handling (Step 6, real Postgres)', 
   });
 
   afterAll(async () => {
+    // Same leak this suite would otherwise cause as
+    // crawler-collector.e2e-spec.ts's "Supplier Portal (fixture)" (see that
+    // file's afterAll comment) — the last test's Source row (e.g.
+    // "Application API (fixture)"/"Application API (secret regression
+    // test)") points at fixtureServer's ephemeral 127.0.0.1 port, which is
+    // about to close below and never listen again.
+    await truncateAll(prisma);
     await app.close();
     await new Promise<void>((resolve) => fixtureServer.close(() => resolve()));
   });

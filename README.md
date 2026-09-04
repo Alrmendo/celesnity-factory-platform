@@ -2324,6 +2324,163 @@ thật). Chỉ làm frontend — không sửa code backend nào.**
   Docker để `docker compose up` + mở `http://localhost:3000` thật. Phần B
   (Definition of Done) để lại cho máy có Docker.
 
+### Step 11 — bổ sung 3 fix sau khi test tay UI thật — 2026-09-04
+
+**Trạng thái: build/test sạch offline (`tsc --noEmit`/`eslint`/`npm run
+test`/`npm run build` cho cả 2 workspace) — máy này KHÔNG có Docker nên
+KHÔNG tự re-test lại 3 fix này bằng mắt; người dùng cần tự click lại trên
+máy có Docker.**
+
+Sau khi tự click-test tay đủ luồng trên máy có Docker (theo checklist
+"Việc cần làm ở máy có Docker", mục Step 11 bên dưới), phát hiện 3 vấn đề
+thật, ghi lại đầy đủ:
+
+**1. Source "Supplier Portal (fixture)" trỏ tới port ephemeral đã chết —
+KHÔNG phải từ `prisma/seed.ts`:**
+- Grep `"127.0.0.1"` và `.listen(0)` toàn repo (loại `node_modules`) chỉ
+  ra ĐÚNG 2 chỗ, cả 2 đều trong `backend/test/`:
+  `crawler-collector.e2e-spec.ts` (dòng tạo `portalServer`/`portalBaseUrl`
+  + hàm `createCrawlerSource()` đặt tên Source cứng
+  `'Supplier Portal (fixture)'`) và `collection-runs.e2e-spec.ts` (cùng
+  pattern cho `fixtureServer`/`fixtureApiBaseUrl`, Source
+  `'Application API (fixture)'`/`'Application API (secret regression
+  test)'`). **`prisma/seed.ts` đọc lại từ đầu xác nhận KHÔNG hề tạo Source
+  CRAWLER nào cả** (chỉ tạo `Production Database` DATABASE và
+  `Application API` API qua `buildBatchScenarios`, cả 2 với
+  `config: {}` rỗng — cũng không dùng Verify/Discover được, xem ghi chú
+  cuối mục này).
+- Nguyên nhân thật: mỗi file `*.e2e-spec.ts` chạm Postgres thật đều
+  `beforeEach(() => truncateAll(prisma))` (xoá TRƯỚC mỗi test) nhưng
+  KHÔNG có `afterAll` xoá lại — dòng Source do TEST CUỐI CÙNG của suite
+  tạo ra (trỏ tới server in-process ephemeral-port) tồn tại vĩnh viễn
+  trong DB dev sau khi suite chạy xong, và server đó đã đóng ngay sau đó
+  → baseUrl chết thật. Đây là hệ quả trực tiếp của khoảng trống đã ghi
+  nhận từ Step 6 ("Việc chưa xong": "Mỗi lần chạy verify-step6.sh... để
+  lại 1 row rác trong DB dev") — Step 11 là lần đầu khoảng trống này thật
+  sự gây lỗi chức năng nhìn thấy được qua UI (không chỉ "rác" vô hại).
+- Fix:
+  - `backend/test/crawler-collector.e2e-spec.ts` +
+    `backend/test/collection-runs.e2e-spec.ts`: thêm
+    `await truncateAll(prisma)` vào đầu `afterAll` (trước `app.close()`,
+    vì `PrismaService.onModuleDestroy` gọi `$disconnect()`) — suite tự
+    dọn sạch sau khi chạy xong, không còn để lại Source ephemeral-port
+    nào nữa từ lần chạy `test:e2e` SAU khi fix này (không giúp DB ĐÃ bị
+    nhiễm từ trước — xem "re-seed" bên dưới).
+  - `backend/prisma/seed.ts`: thêm 1 Source CRAWLER THẬT dùng được qua UI
+    — `name: 'Supplier Portal'`, `config: { baseUrl:
+    'http://supplier-portal:4200' }` (tên service + port nội bộ Docker
+    network, đúng pattern `fixture-api:4000` đã dùng trong
+    `docker-compose.yml`, KHÔNG BAO GIỜ port ephemeral). Trước fix này,
+    `npm run seed` không tạo Source CRAWLER nào cả — nguồn CRAWLER duy
+    nhất người dùng từng thấy là dòng rác từ test leak ở trên.
+  - **Ghi chú thêm (chưa fix, ngoài phạm vi 3 việc được giao)**: 2 Source
+    `Production Database`/`Application API` mà `buildBatchScenarios`
+    seed cũng có `config: {}` rỗng — Verify/Discover/Run collection trên
+    2 dòng này qua UI cũng sẽ lỗi (thiếu `passwordEnvVar`/`baseUrl`/
+    `apiKeyEnvVar`). Không sửa ở đây vì không nằm trong 3 việc được giao;
+    ghi lại để không quên.
+- **`npm run seed` KHÔNG idempotent** (đã ghi rõ ngay trong comment đầu
+  file, không phải phát hiện mới): `work_order_id`/`batch_id` có unique
+  constraint, `buildBatchScenarios` luôn tạo `WO-B001..WO-B008` cố định
+  → chạy `npm run seed` lần 2 trên DB đã seed sẽ FAIL ngay ở record đầu
+  tiên bị trùng, KHÔNG chạy tới được dòng tạo Source CRAWLER mới thêm ở
+  trên. Cách áp dụng fix cho 1 DB dev ĐÃ có sẵn dữ liệu (chọn 1 trong 3,
+  không cái nào tự động chạy được vì máy này không có Docker):
+  1. **Khuyên dùng nếu chỉ cần fix nhanh, không mất dữ liệu khác**: xoá
+     tay đúng 1 dòng rác qua Prisma Studio/psql (`DELETE FROM sources
+     WHERE name = 'Supplier Portal (fixture)'`), rồi tự đăng ký 1 Source
+     CRAWLER mới qua UI Step 11 (`/sources`, type `CRAWLER`, baseUrl
+     `http://supplier-portal:4200`) — không cần re-seed gì cả.
+  2. **Nếu muốn có sẵn đúng Source `Supplier Portal` do seed script tạo**:
+     `UPDATE sources SET config = '{"baseUrl":"http://supplier-portal:4200"}',
+     name = 'Supplier Portal' WHERE name = 'Supplier Portal (fixture)'`
+     (sửa tay 1 dòng, giữ nguyên toàn bộ dữ liệu khác).
+  3. **Muốn DB sạch hoàn toàn theo đúng seed mới**: xoá sạch dữ liệu
+     (TRUNCATE toàn bộ bảng liên quan, xem `test/fixtures/db-utils.ts`
+     làm tham chiếu danh sách bảng) rồi `npm run seed` lại từ đầu — mất
+     hết dữ liệu đã tạo tay qua UI trước đó, chỉ dùng nếu chấp nhận điều
+     này.
+
+**2. Lỗi nghiệp vụ backend bị Nest ẩn thành "Internal server error":**
+- Xác nhận qua UI thật: các lỗi như "references env var ... but it is
+  not set", "has no selectedTable configured" chỉ hiện
+  "Internal server error" chung chung trên UI, khác hẳn lỗi mạng (crawler
+  fetch failed) vốn hiện đúng message thật.
+- Nguyên nhân: NestJS's default exception filter chỉ giữ nguyên
+  `message` cho subclass của `HttpException` (`BadRequestException`,
+  `NotFoundException`,...) — bất kỳ giá trị nào khác ném ra (kể cả `throw
+  new Error(...)` với message rõ ràng) đều bị filter mặc định thay thế
+  bằng `{ statusCode: 500, message: "Internal server error" }` (cố ý, để
+  không rò rỉ chi tiết nội bộ của lỗi KHÔNG lường trước). `backend/src/main.ts`
+  không có exception filter tuỳ chỉnh nào — xác nhận hành vi mặc định của
+  Nest đang áp dụng, không phải bug ở tầng filter riêng nào. `frontend/lib/api.ts`
+  (`apiFetch`) đọc đúng field `message` từ body — không có bug ở tầng
+  fetch helper, nó chỉ đang hiển thị trung thực đúng message mà backend
+  trả về (vốn đã bị Nest thay bằng chuỗi chung chung từ trước khi tới
+  frontend).
+- Grep `throw new Error(` toàn `backend/src` tìm ra đúng 5 chỗ, sửa 4 —
+  chỗ còn lại (`canonicalization.pipeline.ts`'s `resolveGroup requires at
+  least one record`) là bất biến nội bộ của pure function (không bao giờ
+  thật sự xảy ra từ input HTTP hợp lệ), cố tình GIỮ NGUYÊN `Error` thường
+  — nếu nó thật sự throw, đó là bug thật trong code (không phải lỗi cấu
+  hình người dùng), 500 chung chung là đúng hành vi mong muốn cho trường
+  hợp đó, không nên "làm đẹp" thành 400:
+  - `sources.service.ts`'s `resolveDatabaseConfig` — thiếu
+    `passwordEnvVar` (dùng bởi `verifyConnection`/`discoverSchema`/
+    `selectTable`) → `BadRequestException`.
+  - `collection-runs.service.ts`'s `runApiCollection` — thiếu
+    `apiKeyEnvVar` → `BadRequestException`.
+  - `collection-runs.service.ts`'s `runDatabaseCollection` — thiếu
+    `passwordEnvVar` → `BadRequestException`.
+  - `collection-runs.service.ts`'s `runDatabaseCollection` — chưa
+    `selectedTable` → `BadRequestException`.
+  - Cả 4 chỗ đều throw TRƯỚC khi `prisma.collectionRun.create()` (nếu có)
+    chạy — đã kiểm tra kỹ trước khi sửa, đổi sang `BadRequestException`
+    không để lại row `RUNNING` mồ côi nào trong `collection_runs`.
+
+**3. Action "Select" không có xác nhận thành công:**
+- Xác nhận qua UI thật: bấm "Select" xong không có phản hồi trực quan gì
+  (khác "Verify" — có dòng xanh), gây nhầm tưởng đã chọn bảng xong nhưng
+  thực ra chưa, dẫn tới lỗi thật ở bước "Run collection" sau đó ("has no
+  selectedTable configured" — đúng lỗi đã sửa ở mục 2, vòng lặp nhân quả
+  giữa 2 bug này khiến việc test tay ban đầu càng khó hiểu).
+- Fix: `frontend/app/sources/[id]/page.tsx` — thêm dòng xác nhận màu xanh
+  khi `select.phase === 'success'` (`Select thành công: bảng "..." lúc
+  ...`), cùng pattern với khối xác nhận đã có của Verify.
+
+**Verify OFFLINE (backend):**
+- `npx tsc --noEmit` sạch (không output, exit 0).
+- `npm run lint` sạch (không output, exit 0).
+- `npm run test`: vẫn 22/22 pass, không case nào mới — dán nguyên output:
+  ```
+  PASS src/modules/production-domain/freshness.spec.ts
+  PASS src/modules/production-domain/batch-state.spec.ts
+  PASS src/modules/canonicalization/canonicalization.pipeline.spec.ts
+  PASS src/app.controller.spec.ts
+
+  Test Suites: 4 passed, 4 total
+  Tests:       22 passed, 22 total
+  ```
+- `npm run test:e2e` — chưa chạy lại ở lượt này (máy không có Docker);
+  `tsc --noEmit`/`eslint` đã quét cả `test/` (tsconfig không loại trừ
+  `test/`, `eslint` script chạy trên `{src,apps,libs,test}`) nên 2 file
+  `*.e2e-spec.ts` vừa sửa (`afterAll` thêm `truncateAll`) đã được xác
+  nhận không có lỗi biên dịch/cú pháp, chỉ chưa verify hành vi thật.
+
+**Verify OFFLINE (frontend):**
+- `npx tsc --noEmit` sạch (không output, exit 0).
+- `npx eslint` sạch (không output, exit 0).
+- `npm run build` thành công, cùng 3 route như entry Step 11 gốc ở trên
+  (`/canonical-events` ƒ, `/sources` ○, `/sources/[id]` ƒ) — không route
+  nào đổi shape, chỉ thêm 1 khối JSX xác nhận Select.
+
+**CHƯA click-test lại 3 fix này bằng mắt trên trình duyệt thật** — máy
+sửa lỗi này không có Docker. Người dùng cần tự re-test tay trên máy có
+Docker (theo mục checklist Step 11 bên dưới), đặc biệt xác nhận: Source
+`Supplier Portal` (seed mới) Verify/Discover/Run collection thành công
+thật; message lỗi thật hiện đúng khi thiếu env var/selectedTable (không
+còn "Internal server error"); dòng xanh xác nhận hiện sau khi Select.
+
 ## Việc cần làm ở máy có Docker
 
 Checklist thủ công — làm ở máy laptop có Docker chạy được, sau khi pull code
@@ -2400,15 +2557,27 @@ mới nhất:
       `contributingCollectionRunIds`, UUID thật, không placeholder) và
       2 lần gọi cách nhau ~32 phút chứng minh `freshnessMinutes` tính
       động, không phải giá trị cứng.
-- [ ] **Step 11 — chưa click-test, cần máy có Docker.** Frontend Data
-      Sources UI (`app/sources/`, `app/sources/[id]/`,
-      `app/canonical-events/`) đã build sạch offline (`tsc --noEmit`/
-      `eslint`/`npm run build`, xem entry "Step 11" bên trên) nhưng CHƯA
-      tự click qua bằng mắt trên trình duyệt thật. `docker compose up -d
-      --build`, mở `http://localhost:3000/sources`, tự test tay ít nhất
-      1 lần đủ luồng register → verify → discover → select → run
-      collection → xem lịch sử → preview provenance cho MỖI loại source
-      (API, DATABASE, CRAWLER — CRAWLER bỏ qua bước Select vì không có).
-      Sau khi test tay xong: sửa lại đúng entry "Step 11" (đổi trạng thái
-      "CHƯA click-test" → xác nhận đã tự test tay thật + ghi rõ kết quả/
-      bug nếu có), rồi mới đề xuất commit message thứ 2 cho phần verify.
+- [x] **Step 11 — đã test tay, tìm ra 3 bug thật, đã sửa (xem entry "Step
+      11 — bổ sung 3 fix sau khi test tay UI thật" bên trên).** Test tay
+      trên `http://localhost:3000/sources` phát hiện: (1) Source
+      "Supplier Portal (fixture)" seed sai — thật ra là rác leak từ
+      `crawler-collector.e2e-spec.ts`, không phải từ `prisma/seed.ts`;
+      (2) lỗi nghiệp vụ backend (thiếu env var, chưa selectedTable) hiện
+      "Internal server error" chung chung thay vì message thật; (3) nút
+      "Select" không có xác nhận thành công. Cả 3 đã sửa offline (backend
+      `tsc`/`eslint`/`npm run test` sạch, frontend `tsc`/`eslint`/`npm run
+      build` sạch) — xem entry đó cho chi tiết đầy đủ.
+- [ ] **Step 11 — chưa re-test lại 3 fix trên, cần máy có Docker.**
+      `docker compose up -d --build` (build lại image backend/frontend
+      với code vừa sửa). Nếu DB dev đã có sẵn dữ liệu cũ: áp dụng 1 trong
+      3 cách xử lý Source "Supplier Portal (fixture)" liệt kê trong entry
+      "Step 11 — bổ sung..." (xoá tay + tạo lại qua UI, hoặc UPDATE tay,
+      hoặc truncate + `npm run seed` lại — `npm run seed` KHÔNG idempotent,
+      xem entry đó). Xác nhận lại: Source `Supplier Portal` (seed mới,
+      nếu re-seed) Verify/Discover/Run collection thành công thật qua
+      `http://supplier-portal:4200`; thử 1 kịch bản thiếu env var (ví dụ
+      chưa set `PRODUCTION_DB_PASSWORD`) → UI hiện đúng message thật,
+      không còn "Internal server error"; bấm Select → thấy dòng xanh xác
+      nhận. Sau khi re-test xong: sửa lại đúng entry "Step 11 — bổ sung..."
+      (đổi trạng thái + dán bằng chứng thật), rồi mới đề xuất commit
+      message thứ 2 cho phần verify.

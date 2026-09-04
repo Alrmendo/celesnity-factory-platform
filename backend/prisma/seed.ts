@@ -33,6 +33,27 @@ async function main(): Promise<void> {
       }
     }
 
+    // A real, working CRAWLER Source for manual UI testing (Step 11's Data
+    // Sources view) — buildBatchScenarios() above never creates one (only
+    // DATABASE "Production Database" and API "Application API", both with
+    // config: {}, which aren't wired for Verify/Discover either). baseUrl
+    // is the FIXED Docker-network hostname:port (`supplier-portal:4200`,
+    // matching fixture-api's `fixture-api:4000` pattern in
+    // docker-compose.yml — the container's own listening port, not the
+    // 4300 host-side remap) — never an ephemeral 127.0.0.1 port. Without
+    // this, the only "Supplier Portal"-named Source anyone would ever see
+    // was one leaked into the DB by crawler-collector.e2e-spec.ts's
+    // in-process test server (baseUrl 127.0.0.1:<ephemeral>, dead the
+    // moment that test run ends) — see README's "Step 11 — bổ sung" entry
+    // for the real "fetch failed" bug this caused.
+    await prisma.source.create({
+      data: {
+        name: 'Supplier Portal',
+        type: 'CRAWLER',
+        config: { baseUrl: 'http://supplier-portal:4200' },
+      },
+    });
+
     console.log(`Seeded ${Object.keys(scenarios).length} batch scenarios.`);
   } finally {
     await prisma.$disconnect();

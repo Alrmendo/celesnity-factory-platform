@@ -69,6 +69,15 @@ describe('Supplier crawler: register/verify/discover/collect (Step 8, real Postg
   });
 
   afterAll(async () => {
+    // Without this, the last test's `createCrawlerSource()` row (name
+    // "Supplier Portal (fixture)", baseUrl http://127.0.0.1:<ephemeral
+    // port>) survives past this suite — beforeEach only truncates BEFORE
+    // each test, never after the last one. `portalServer` is closed right
+    // after, so that baseUrl becomes permanently dead; a stray row exactly
+    // like this is what showed up as a real "fetch failed" in the UI when
+    // someone later browsed the dev DB (see README's "Step 11 — bổ sung"
+    // entry for the full incident).
+    await truncateAll(prisma);
     await app.close();
     await new Promise<void>((resolve) => portalServer.close(() => resolve()));
   });
